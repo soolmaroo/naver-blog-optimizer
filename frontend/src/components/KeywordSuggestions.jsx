@@ -124,11 +124,45 @@ export default function KeywordSuggestions({ onAnalyze }) {
               return { region, suggestions: fallbackSuggestions, isFallback: true };
             })
             .then(data => {
+              // 디버깅: 받은 데이터 확인
+              console.log(`[${region}] 백엔드 응답 데이터:`, data);
+              console.log(`[${region}] 데이터 타입:`, typeof data, Array.isArray(data));
+              
               // data가 배열인지 확인
               if (data && typeof data === 'object' && 'suggestions' in data) {
+                console.log(`[${region}] 객체 형태로 받음 (suggestions 속성 있음)`);
                 return data; // 이미 { region, suggestions } 형태
               }
-              const suggestions = Array.isArray(data) ? data : [];
+              
+              // 백엔드는 배열을 반환하므로 배열로 처리
+              let suggestions = [];
+              if (Array.isArray(data)) {
+                suggestions = data;
+                console.log(`[${region}] 배열로 받음:`, suggestions.length, '개');
+              } else if (data && typeof data === 'object') {
+                // 객체인 경우 배열로 변환 시도
+                console.log(`[${region}] 객체를 배열로 변환 시도`);
+                suggestions = [data];
+              } else {
+                console.warn(`[${region}] 예상치 못한 데이터 형식:`, typeof data);
+                suggestions = [];
+              }
+              
+              // 각 suggestion이 올바른 형식인지 확인
+              suggestions = suggestions.map((item, idx) => {
+                if (!item || typeof item !== 'object') {
+                  console.warn(`[${region}] 잘못된 suggestion 형식 (인덱스 ${idx}):`, item);
+                  return null;
+                }
+                // 필수 필드 확인
+                if (!item.keyword) {
+                  console.warn(`[${region}] keyword 필드 없음 (인덱스 ${idx}):`, item);
+                  return null;
+                }
+                return item;
+              }).filter(item => item !== null);
+              
+              console.log(`[${region}] 최종 변환된 suggestions:`, suggestions.length, '개');
               return { region, suggestions, isFallback: false };
             })
         );
@@ -136,15 +170,28 @@ export default function KeywordSuggestions({ onAnalyze }) {
         const results = await Promise.all(promises);
         clearTimeout(timeoutId);
         
+        // 디버깅: 최종 결과 확인
+        console.log('모든 지역 결과:', results);
+        
         // 지역별로 구분하여 저장
         const grouped = {};
         let hasError = false;
-        results.forEach(({ region, suggestions, isFallback = false }) => {
+        results.forEach((result) => {
+          // result가 올바른 형태인지 확인
+          if (!result || typeof result !== 'object') {
+            console.error('잘못된 결과 형태:', result);
+            return;
+          }
+          
+          const { region, suggestions, isFallback = false } = result;
+          console.log(`[${region}] 최종 저장:`, suggestions?.length || 0, '개 키워드');
           grouped[region] = suggestions || [];
           if (isFallback) {
             hasError = true;
           }
         });
+        
+        console.log('최종 grouped 데이터:', grouped);
         
         // 모든 지역에 데이터가 없으면 빈 상태로 처리 (에러 아님)
         const hasAnyData = Object.values(grouped).some(suggestions => suggestions.length > 0);

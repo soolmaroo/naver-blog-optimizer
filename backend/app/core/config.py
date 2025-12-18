@@ -15,11 +15,19 @@ load_dotenv(dotenv_path=env_path, override=True)
 
 # 환경 변수 확인 (디버깅용)
 google_key = os.getenv("GOOGLE_API_KEY", "")
+naver_id = os.getenv("NAVER_CLIENT_ID", "")
+naver_secret = os.getenv("NAVER_CLIENT_SECRET", "")
 print(f"[Config] GOOGLE_API_KEY 로드 여부: {'있음' if google_key else '없음'}")
 if google_key:
     print(f"[Config] GOOGLE_API_KEY 길이: {len(google_key)} (처음 10자: {google_key[:10]}...)")
 else:
     print("[Config] GOOGLE_API_KEY가 비어있습니다!")
+print(f"[Config] NAVER_CLIENT_ID 로드 여부: {'있음' if naver_id else '없음'}")
+if naver_id:
+    print(f"[Config] NAVER_CLIENT_ID 길이: {len(naver_id)} (처음 10자: {naver_id[:10]}...)")
+print(f"[Config] NAVER_CLIENT_SECRET 로드 여부: {'있음' if naver_secret else '없음'}")
+if naver_secret:
+    print(f"[Config] NAVER_CLIENT_SECRET 길이: {len(naver_secret)} (처음 10자: {naver_secret[:10]}...)")
 
 
 class Settings:
@@ -31,6 +39,10 @@ class Settings:
         # 초기화 시 로깅
         if not self.google_api_key:
             print("[Settings] 경고: GOOGLE_API_KEY가 설정되지 않았습니다!")
+        if not self.naver_client_id:
+            print("[Settings] 경고: NAVER_CLIENT_ID가 설정되지 않았습니다!")
+        if not self.naver_client_secret:
+            print("[Settings] 경고: NAVER_CLIENT_SECRET가 설정되지 않았습니다!")
 
 
 _settings_cache = None
@@ -47,6 +59,10 @@ def get_settings() -> Settings:
     print(f"[get_settings] google_api_key 설정 여부: {'있음' if settings.google_api_key else '없음'}")
     if settings.google_api_key:
         print(f"[get_settings] google_api_key 값: {settings.google_api_key[:10]}...")
+    print(f"[get_settings] naver_client_id 설정 여부: {'있음' if settings.naver_client_id else '없음'}")
+    if settings.naver_client_id:
+        print(f"[get_settings] naver_client_id 값: {settings.naver_client_id[:10]}...")
+    print(f"[get_settings] naver_client_secret 설정 여부: {'있음' if settings.naver_client_secret else '없음'}")
     
     _settings_cache = settings
     return settings

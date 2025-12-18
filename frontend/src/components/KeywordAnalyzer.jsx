@@ -87,14 +87,6 @@ export default function KeywordAnalyzer({ initialKeyword = '' }) {
           <div className="space-y-3">
             <div className="grid grid-cols-2 gap-4">
               <div>
-                <p className="text-xs text-slate-600">일주일 검색량</p>
-                <p className="text-lg font-bold text-clinicGreen-700">
-                  {analysis.search_volume !== null && analysis.search_volume !== undefined
-                    ? analysis.search_volume.toLocaleString()
-                    : 'N/A'}
-                </p>
-              </div>
-              <div>
                 <p className="text-xs text-slate-600">블로그 발행량</p>
                 <p className={`text-lg font-bold ${
                   analysis.blog_count !== null && analysis.blog_count !== undefined
@@ -104,6 +96,14 @@ export default function KeywordAnalyzer({ initialKeyword = '' }) {
                   {analysis.blog_count !== null && analysis.blog_count !== undefined
                     ? analysis.blog_count.toLocaleString()
                     : '조회 실패'}
+                </p>
+              </div>
+              <div>
+                <p className="text-xs text-slate-600">일주일 검색량</p>
+                <p className="text-lg font-bold text-clinicGreen-700">
+                  {analysis.search_volume !== null && analysis.search_volume !== undefined
+                    ? analysis.search_volume.toLocaleString()
+                    : 'N/A'}
                 </p>
               </div>
             </div>

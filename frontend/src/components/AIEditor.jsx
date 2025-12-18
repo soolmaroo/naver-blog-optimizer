@@ -5,21 +5,24 @@ const API_BASE_URL = 'http://127.0.0.1:8000/api';
 export default function AIEditor() {
   const [topic, setTopic] = useState('');
   const [keywords, setKeywords] = useState('');
-  const [writingInstruction, setWritingInstruction] = useState(''); // 글쓰기 지시사항
+  const [writingInstruction, setWritingInstruction] = useState(''); // 글쓰기 지시사항 (구조, 길이, 타겟, 키워드 배치 등)
+  const [contentInstruction, setContentInstruction] = useState(''); // 글의 내용 지시사항 (구체적인 사건, 경험 등)
   const [draft, setDraft] = useState('');
   const [violations, setViolations] = useState([]);
   const [loading, setLoading] = useState(false);
   const [wordCount, setWordCount] = useState(0);
-  const [writingStyle, setWritingStyle] = useState('blog'); // 'diary', 'blog', 'essay', 'personal'
+  const [writingStyle, setWritingStyle] = useState('personal'); // 'diary', 'blog', 'essay', 'personal' - 기본값: 'personal' (종성이가 씀 !)
   
   // 퇴고 관련 상태
   const [revisionInstruction, setRevisionInstruction] = useState('');
   const [revisedDraft, setRevisedDraft] = useState('');
   const [revising, setRevising] = useState(false);
+  const [finalDraft, setFinalDraft] = useState(''); // 최종 결정된 버전
   
   // 학습 관련 상태
   const [showLearning, setShowLearning] = useState(false);
-  const [blogUrls, setBlogUrls] = useState('');
+  const [blogMainUrl, setBlogMainUrl] = useState(''); // 블로그 메인 URL
+  const [blogUrls, setBlogUrls] = useState(''); // 개별 포스트 URL
   const [blogTexts, setBlogTexts] = useState('');
   const [personalInfo, setPersonalInfo] = useState('');
   const [clinicInfo, setClinicInfo] = useState('');
@@ -41,7 +44,8 @@ export default function AIEditor() {
         body: JSON.stringify({
           topic: topic.trim(),
           keywords: keywordList.length > 0 ? keywordList : undefined,
-          writing_instruction: writingInstruction.trim() || undefined, // 글쓰기 지시사항
+          writing_instruction: writingInstruction.trim() || undefined, // 글쓰기 지시사항 (구조, 길이, 타겟 등)
+          content_instruction: contentInstruction.trim() || undefined, // 글의 내용 지시사항 (구체적인 사건, 경험 등)
           tone: style, // 'diary', 'blog', 'essay', 'personal'
           length: 'medium'
         }),
@@ -59,6 +63,8 @@ export default function AIEditor() {
       // 초안 생성 시 퇴고 관련 상태 초기화
       setRevisedDraft('');
       setRevisionInstruction('');
+      setFinalDraft('');
+      // 내용 지시사항은 유지 (재사용 가능)
     } catch (error) {
       console.error('초안 생성 실패:', error);
       alert(error.message || '초안 생성 중 오류가 발생했습니다.');
@@ -107,14 +113,12 @@ export default function AIEditor() {
 
       const data = await response.json();
       setRevisedDraft(data.revised_draft);
-      setWordCount(data.word_count || data.revised_draft.length);
       
-      // 퇴고된 버전을 메인 초안으로 교체할지 선택
-      const useRevised = confirm('퇴고된 버전을 사용하시겠습니까? (확인: 교체, 취소: 유지)');
-      if (useRevised) {
-        setDraft(data.revised_draft);
-        setRevisedDraft('');
-        setRevisionInstruction('');
+      // 학습 저장 여부 표시
+      if (data.learning_saved) {
+        console.log('퇴고 패턴이 학습 데이터에 저장되었습니다.');
+        // 학습 상태 새로고침
+        loadLearningStatus();
       }
     } catch (error) {
       console.error('퇴고 실패:', error);
@@ -125,15 +129,18 @@ export default function AIEditor() {
   };
 
   const handleLearn = async () => {
-    if (!blogUrls.trim() && !blogTexts.trim() && !personalInfo.trim() && !clinicInfo.trim()) {
-      alert('학습할 내용을 입력해주세요. (블로그 URL 또는 텍스트)');
+    if (!blogMainUrl.trim() && !blogUrls.trim() && !blogTexts.trim() && !personalInfo.trim() && !clinicInfo.trim()) {
+      alert('학습할 내용을 입력해주세요. (블로그 메인 URL, 개별 URL 또는 텍스트)');
       return;
     }
 
     try {
       setLearningLoading(true);
       
-      // URL 목록 파싱 (줄바꿈 또는 쉼표로 구분)
+      // 블로그 메인 URL 처리
+      const mainUrl = blogMainUrl.trim() || undefined;
+      
+      // 개별 URL 목록 파싱 (줄바꿈 또는 쉼표로 구분)
       const urlList = blogUrls
         .split(/[,\n]/)
         .map(url => url.trim())
@@ -148,6 +155,7 @@ export default function AIEditor() {
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({
+          blog_main_url: mainUrl,
           blog_urls: urlList.length > 0 ? urlList : undefined,
           blog_texts: textList.length > 0 ? textList : undefined,
           personal_info: personalInfo.trim() || undefined,
@@ -178,6 +186,7 @@ export default function AIEditor() {
       }
       
       alert(resultMessage);
+      setBlogMainUrl('');
       setBlogUrls('');
       setBlogTexts('');
       setPersonalInfo('');
@@ -230,30 +239,65 @@ export default function AIEditor() {
                   <span className="text-2xl">📊</span>
                   <h4 className="font-semibold text-clinicGreen-800">학습 상태</h4>
                 </div>
-                <div className="grid grid-cols-2 gap-3 text-sm">
+                <div className="grid grid-cols-3 gap-3 text-sm">
                   <div className="rounded-lg bg-white p-3">
                     <p className="text-xs text-slate-500 mb-1">학습된 텍스트</p>
-                    <p className="text-xl font-bold text-clinicGreen-700">{learningStatus.blog_texts_count}개</p>
+                    <p className="text-xl font-bold text-clinicGreen-700">{learningStatus.blog_texts_count || 0}개</p>
                   </div>
                   <div className="rounded-lg bg-white p-3">
-                    <p className="text-xs text-slate-500 mb-1">학습 정보</p>
-                    <div className="flex flex-wrap gap-1">
-                      {learningStatus.has_personal_info && (
-                        <span className="inline-flex items-center gap-1 rounded bg-clinicGreen-100 px-2 py-1 text-xs font-medium text-clinicGreen-700">
-                          ✓ 개인 정보
-                        </span>
-                      )}
-                      {learningStatus.has_clinic_info && (
-                        <span className="inline-flex items-center gap-1 rounded bg-clinicGreen-100 px-2 py-1 text-xs font-medium text-clinicGreen-700">
-                          ✓ 한의원 정보
-                        </span>
-                      )}
-                      {!learningStatus.has_personal_info && !learningStatus.has_clinic_info && (
-                        <span className="text-xs text-slate-400">없음</span>
-                      )}
-                    </div>
+                    <p className="text-xs text-slate-500 mb-1">퇴고 패턴</p>
+                    <p className="text-xl font-bold text-blue-700">{learningStatus.revision_patterns_count || 0}개</p>
+                  </div>
+                  <div className="rounded-lg bg-white p-3">
+                    <p className="text-xs text-slate-500 mb-1">스타일 규칙</p>
+                    <p className="text-xl font-bold text-purple-700">{learningStatus.style_rules_count || 0}개</p>
                   </div>
                 </div>
+                
+                {/* 학습된 스타일 규칙 표시 */}
+                {learningStatus.style_rules && learningStatus.style_rules.length > 0 && (
+                  <div className="mt-3 rounded-lg border-2 border-purple-200 bg-purple-50 p-3">
+                    <div className="mb-2 flex items-center gap-2">
+                      <span className="text-lg">🎯</span>
+                      <h4 className="font-semibold text-purple-800">학습된 스타일 규칙 (영구 적용)</h4>
+                    </div>
+                    <p className="mb-2 text-xs text-slate-600">
+                      퇴고를 통해 설정한 스타일 규칙이 초안 생성 시 자동으로 반영됩니다.
+                    </p>
+                    <div className="space-y-2">
+                      {learningStatus.style_rules.map((rule, idx) => (
+                        <div key={idx} className="rounded-lg border border-purple-200 bg-white p-2">
+                          <div className="flex items-start gap-2">
+                            <span className="flex h-5 w-5 items-center justify-center rounded-full bg-purple-100 text-xs font-bold text-purple-700">
+                              {idx + 1}
+                            </span>
+                            <p className="flex-1 text-sm text-purple-900">{rule}</p>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+                
+                {/* 퇴고 패턴 요약 표시 */}
+                {learningStatus.revision_summary && learningStatus.revision_summary.length > 0 && (
+                  <div className="mt-3 rounded-lg border-2 border-blue-200 bg-blue-50 p-3">
+                    <div className="mb-2 flex items-center gap-2">
+                      <span className="text-lg">✏️</span>
+                      <h4 className="font-semibold text-blue-800">학습된 퇴고 패턴</h4>
+                    </div>
+                    <p className="mb-2 text-xs text-slate-600">
+                      자주 요청하는 수정 사항이 초안 생성 시 자동으로 반영됩니다.
+                    </p>
+                    <div className="flex flex-wrap gap-2">
+                      {learningStatus.revision_summary.map((item, idx) => (
+                        <span key={idx} className="inline-flex items-center gap-1 rounded bg-blue-100 px-2 py-1 text-xs font-medium text-blue-700">
+                          {item}
+                        </span>
+                      ))}
+                    </div>
+                  </div>
+                )}
                 {learningStatus.updated_at && (
                   <p className="mt-2 text-xs text-slate-500">
                     최종 업데이트: {new Date(learningStatus.updated_at).toLocaleString('ko-KR')}
@@ -321,9 +365,28 @@ export default function AIEditor() {
         
         {showLearning && (
           <div className="space-y-4">
+            {/* 블로그 메인 URL 섹션 - 별도로 강조 */}
+            <div className="rounded-lg border-2 border-clinicGreen-300 bg-clinicGreen-50 p-4">
+              <div className="mb-3 flex items-center gap-2">
+                <span className="text-xl">🔗</span>
+                <h4 className="font-semibold text-clinicGreen-800">블로그 메인 URL (모든 포스트 자동 추출)</h4>
+              </div>
+              <input
+                type="text"
+                value={blogMainUrl}
+                onChange={(e) => setBlogMainUrl(e.target.value)}
+                placeholder="https://blog.naver.com/username"
+                className="mb-2 w-full rounded-lg border-2 border-clinicGreen-400 bg-white px-4 py-3 text-sm font-medium focus:border-clinicGreen-500 focus:outline-none focus:ring-2 focus:ring-clinicGreen-200"
+              />
+              <p className="text-xs text-slate-600">
+                네이버 블로그 메인 URL을 입력하면 모든 포스트를 자동으로 찾아서 학습합니다.
+              </p>
+            </div>
+            
+            {/* 개별 포스트 URL 섹션 */}
             <div>
               <label className="mb-1 block text-sm font-medium text-slate-700">
-                블로그 URL (자동 크롤링) - 한 줄에 하나씩 또는 쉼표로 구분
+                또는 개별 포스트 URL (한 줄에 하나씩 또는 쉼표로 구분)
               </label>
               <textarea
                 value={blogUrls}
@@ -333,7 +396,7 @@ export default function AIEditor() {
                 className="w-full rounded-lg border border-slate-300 px-4 py-2 focus:border-clinicGreen-500 focus:outline-none focus:ring-2 focus:ring-clinicGreen-200"
               />
               <p className="mt-1 text-xs text-slate-500">
-                네이버 블로그, 티스토리 등 지원. URL만 입력하면 자동으로 텍스트를 추출합니다.
+                특정 포스트만 학습하려면 개별 URL을 입력하세요.
               </p>
             </div>
             <div>
@@ -410,17 +473,32 @@ export default function AIEditor() {
         </div>
         <div>
           <label className="mb-1 block text-sm font-medium text-slate-700">
+            글의 내용 (선택사항)
+          </label>
+          <textarea
+            value={contentInstruction}
+            onChange={(e) => setContentInstruction(e.target.value)}
+            placeholder="예: 내가 추나하다가 어깨가 다쳤어. 그리고 쉬는 날 부원장에게 치료 받았어"
+            rows={4}
+            className="w-full rounded-lg border border-slate-300 px-4 py-2 focus:border-clinicGreen-500 focus:outline-none focus:ring-2 focus:ring-clinicGreen-200"
+          />
+          <p className="mt-1 text-xs text-slate-500">
+            구체적인 사건, 경험, 내용을 간단히 입력하세요. 종성이 스타일로 전후 사정, 치료 방식 등을 길게 늘려 꾸며서 작성됩니다.
+          </p>
+        </div>
+        <div>
+          <label className="mb-1 block text-sm font-medium text-slate-700">
             글쓰기 지시사항 (선택사항)
           </label>
           <textarea
             value={writingInstruction}
             onChange={(e) => setWritingInstruction(e.target.value)}
-            placeholder="예: 내가 지금 어깨가 아픈데 환자들한테 내가 아픈 부위를 설명하고, 치료 방식도 설명할거야. 아픈 부위는 승모근이고, 팔을 들 때 아프며, 치료 방법은 추나요법이야."
+            placeholder="예: 글의 구조는 서론-본론-결론으로, 길이는 800자 정도, 타겟은 30-40대 여성, 키워드는 자연스럽게 3-5회 배치"
             rows={4}
             className="w-full rounded-lg border border-slate-300 px-4 py-2 focus:border-clinicGreen-500 focus:outline-none focus:ring-2 focus:ring-clinicGreen-200"
           />
           <p className="mt-1 text-xs text-slate-500">
-            글의 구체적인 내용, 구조, 설명 방식을 자유롭게 지시해주세요.
+            글의 구조, 길이, 타겟 독자, 키워드 배치 등 전체 짜임새를 지시해주세요.
           </p>
         </div>
         
@@ -481,59 +559,65 @@ export default function AIEditor() {
         </div>
 
         {draft && (
-        <div className="mt-4 space-y-3">
-          <div className="flex items-center justify-between">
-            <h4 className="font-semibold text-slate-900">생성된 초안</h4>
-            <div className="flex gap-2 text-sm text-slate-600">
-              <span>글자 수: {wordCount}</span>
-              <button
-                onClick={handleCheckViolations}
-                className="text-clinicGreen-600 hover:text-clinicGreen-700"
-              >
-                위반 단어 검사
-              </button>
-            </div>
-          </div>
-          <textarea
-            value={draft}
-            onChange={(e) => {
-              setDraft(e.target.value);
-              setWordCount(e.target.value.length);
-            }}
-            rows={12}
-            className="w-full rounded-lg border border-slate-300 px-4 py-3 focus:border-clinicGreen-500 focus:outline-none focus:ring-2 focus:ring-clinicGreen-200"
-          />
-          
-          {violations.length > 0 && (
-            <div className="rounded-lg border border-red-200 bg-red-50 p-3">
-              <p className="mb-2 text-sm font-semibold text-red-800">의료법 위반 단어 감지:</p>
-              <div className="flex flex-wrap gap-2">
-                {violations.map((word, idx) => (
-                  <span key={idx} className="rounded bg-red-100 px-2 py-1 text-xs text-red-700">
-                    {word}
-                  </span>
-                ))}
+        <div className="mt-4 space-y-4">
+          {/* 생성된 초안 섹션 */}
+          <div className="rounded-lg border-2 border-slate-300 bg-white p-4">
+            <div className="flex items-center justify-between mb-3">
+              <h4 className="font-semibold text-slate-900">📝 생성된 초안</h4>
+              <div className="flex gap-2 text-sm text-slate-600">
+                <span>글자 수: {wordCount}</span>
+                <button
+                  onClick={handleCheckViolations}
+                  className="text-clinicGreen-600 hover:text-clinicGreen-700 font-medium"
+                >
+                  위반 단어 검사
+                </button>
               </div>
             </div>
-          )}
+            <textarea
+              value={draft}
+              onChange={(e) => {
+                setDraft(e.target.value);
+                setWordCount(e.target.value.length);
+              }}
+              rows={12}
+              className="w-full rounded-lg border border-slate-300 px-4 py-3 focus:border-clinicGreen-500 focus:outline-none focus:ring-2 focus:ring-clinicGreen-200"
+            />
+            
+            {violations.length > 0 && (
+              <div className="mt-3 rounded-lg border border-red-200 bg-red-50 p-3">
+                <p className="mb-2 text-sm font-semibold text-red-800">의료법 위반 단어 감지:</p>
+                <div className="flex flex-wrap gap-2">
+                  {violations.map((word, idx) => (
+                    <span key={idx} className="rounded bg-red-100 px-2 py-1 text-xs text-red-700">
+                      {word}
+                    </span>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
 
-          {/* 퇴고 섹션 */}
-          <div className="mt-4 rounded-lg border border-clinicGreen-200 bg-clinicGreen-50 p-4">
-            <h5 className="mb-2 text-sm font-semibold text-clinicGreen-700">✏️ 퇴고하기</h5>
-            <p className="mb-3 text-xs text-slate-600">
-              초안을 수정하고 싶으시면 아래에 수정 지시사항을 입력해주세요. 예: "더 친근하게 써줘", "첫 문단을 더 강하게 시작해줘"
+          {/* 퇴고하기 섹션 - 별도 섹션으로 분리 */}
+          <div className="rounded-lg border-2 border-blue-300 bg-blue-50 p-4">
+            <div className="mb-3 flex items-center gap-2">
+              <span className="text-xl">✏️</span>
+              <h4 className="font-semibold text-blue-800">퇴고하기</h4>
+            </div>
+            <p className="mb-3 text-sm text-slate-700">
+              초안을 수정하고 싶으시면 아래에 수정 지시사항을 입력해주세요. 학습된 어투가 자동으로 반영됩니다.
             </p>
             <textarea
               value={revisionInstruction}
               onChange={(e) => setRevisionInstruction(e.target.value)}
               placeholder="예: 더 친근한 어투로 바꿔줘, 첫 문단을 더 강하게 시작해줘, 전문 용어를 쉽게 풀어써줘"
               rows={3}
-              className="mb-3 w-full rounded-lg border border-slate-300 px-4 py-2 text-sm focus:border-clinicGreen-500 focus:outline-none focus:ring-2 focus:ring-clinicGreen-200"
+              className="mb-3 w-full rounded-lg border border-slate-300 px-4 py-2 text-sm focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-200"
             />
             <button
               onClick={handleRevise}
               disabled={revising || !revisionInstruction.trim()}
-              className="w-full rounded-lg bg-clinicGreen-600 px-4 py-2 text-sm font-medium text-white hover:bg-clinicGreen-700 disabled:opacity-50"
+              className="w-full rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700 disabled:opacity-50"
             >
               {revising ? '퇴고 중...' : '퇴고하기'}
             </button>
@@ -541,28 +625,84 @@ export default function AIEditor() {
 
           {/* 퇴고된 버전 표시 */}
           {revisedDraft && (
-            <div className="mt-4 space-y-3">
-              <div className="flex items-center justify-between">
-                <h4 className="font-semibold text-clinicGreen-700">✨ 퇴고된 버전</h4>
-                <div className="flex gap-2 text-sm text-slate-600">
+            <div className="rounded-lg border-2 border-clinicGreen-300 bg-clinicGreen-50 p-4">
+              <div className="flex items-center justify-between mb-3">
+                <div className="flex items-center gap-2">
+                  <span className="text-xl">✨</span>
+                  <h4 className="font-semibold text-clinicGreen-700">퇴고된 버전</h4>
+                </div>
+                <div className="text-sm text-slate-600">
                   <span>글자 수: {revisedDraft.length}</span>
-                  <button
-                    onClick={() => {
-                      setDraft(revisedDraft);
-                      setRevisedDraft('');
-                      setRevisionInstruction('');
-                    }}
-                    className="text-clinicGreen-600 hover:text-clinicGreen-700"
-                  >
-                    이 버전 사용
-                  </button>
                 </div>
               </div>
               <textarea
                 value={revisedDraft}
                 onChange={(e) => setRevisedDraft(e.target.value)}
                 rows={12}
-                className="w-full rounded-lg border border-clinicGreen-300 bg-clinicGreen-50 px-4 py-3 focus:border-clinicGreen-500 focus:outline-none focus:ring-2 focus:ring-clinicGreen-200"
+                className="mb-3 w-full rounded-lg border border-clinicGreen-300 bg-white px-4 py-3 focus:border-clinicGreen-500 focus:outline-none focus:ring-2 focus:ring-clinicGreen-200"
+              />
+            </div>
+          )}
+
+          {/* 최종 결정 버튼 */}
+          <div className="rounded-lg border-2 border-purple-300 bg-purple-50 p-4">
+            <div className="mb-3 flex items-center gap-2">
+              <span className="text-xl">✅</span>
+              <h4 className="font-semibold text-purple-800">최종 결정</h4>
+            </div>
+            <p className="mb-3 text-sm text-slate-700">
+              사용할 버전을 선택하고 최종 결정하세요. 최종 결정된 버전은 별도로 저장됩니다.
+            </p>
+            <div className="flex gap-3">
+              <button
+                onClick={() => {
+                  setFinalDraft(draft);
+                  alert('초안 버전이 최종 결정되었습니다!');
+                }}
+                className="flex-1 rounded-lg bg-slate-600 px-4 py-3 font-medium text-white hover:bg-slate-700"
+              >
+                초안 버전 선택
+              </button>
+              {revisedDraft && (
+                <button
+                  onClick={() => {
+                    setFinalDraft(revisedDraft);
+                    alert('퇴고된 버전이 최종 결정되었습니다!');
+                  }}
+                  className="flex-1 rounded-lg bg-clinicGreen-600 px-4 py-3 font-medium text-white hover:bg-clinicGreen-700"
+                >
+                  퇴고된 버전 선택
+                </button>
+              )}
+            </div>
+          </div>
+
+          {/* 최종 결정된 버전 표시 */}
+          {finalDraft && (
+            <div className="rounded-lg border-2 border-purple-400 bg-purple-100 p-4">
+              <div className="mb-3 flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <span className="text-xl">🎯</span>
+                  <h4 className="font-semibold text-purple-900">최종 결정된 버전</h4>
+                </div>
+                <div className="flex gap-2 text-sm text-purple-700">
+                  <span>글자 수: {finalDraft.length}</span>
+                  <button
+                    onClick={() => {
+                      navigator.clipboard.writeText(finalDraft);
+                      alert('최종 버전이 클립보드에 복사되었습니다!');
+                    }}
+                    className="font-medium hover:text-purple-900"
+                  >
+                    복사하기
+                  </button>
+                </div>
+              </div>
+              <textarea
+                value={finalDraft}
+                onChange={(e) => setFinalDraft(e.target.value)}
+                rows={12}
+                className="w-full rounded-lg border border-purple-300 bg-white px-4 py-3 focus:border-purple-500 focus:outline-none focus:ring-2 focus:ring-purple-200"
               />
             </div>
           )}
