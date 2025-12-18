@@ -30,6 +30,8 @@ dist-ssr/
 
 # IDE
 .vscode/
+!.vscode/                # 폴더 자체를 예외로 추가
+!.vscode/settings.json   # settings.json은 예외 (팀 공유용)
 .idea/
 *.swp
 *.swo
@@ -46,7 +48,8 @@ ehthumbs.db
 Thumbs.db
 
 # Project specific
-learning_data.json
+# learning_data.json - 주석 처리하면 GitHub에 올라감 (주의: 개인 정보 포함 가능)
+# learning_data.json
 *.txt
 my-fastapi-app/
 

@@ -94,7 +94,7 @@ export default function KeywordAnalyzer({ initialKeyword = '' }) {
                     : 'text-red-500'
                 }`}>
                   {analysis.blog_count !== null && analysis.blog_count !== undefined
-                    ? analysis.blog_count.toLocaleString()
+                    ? analysis.blog_count.toLocaleString('ko-KR')
                     : '조회 실패'}
                 </p>
               </div>
@@ -102,7 +102,7 @@ export default function KeywordAnalyzer({ initialKeyword = '' }) {
                 <p className="text-xs text-slate-600">일주일 검색량</p>
                 <p className="text-lg font-bold text-clinicGreen-700">
                   {analysis.search_volume !== null && analysis.search_volume !== undefined
-                    ? analysis.search_volume.toLocaleString()
+                    ? analysis.search_volume.toLocaleString('ko-KR')
                     : 'N/A'}
                 </p>
               </div>

@@ -111,13 +111,13 @@ export default function RelatedKeywords({ onAnalyze }) {
                         : 'text-red-500'
                     }`}>
                       {item.blog_count !== null && item.blog_count !== undefined 
-                        ? item.blog_count.toLocaleString() 
+                        ? item.blog_count.toLocaleString('ko-KR') 
                         : '조회 실패'}
                     </span>
                   </span>
                   {item.search_volume !== null && item.search_volume !== undefined && item.search_volume > 0 && (
                     <span className="text-slate-600">
-                      일주일 검색량: <span className="font-semibold text-clinicGreen-700">{item.search_volume.toLocaleString()}</span>
+                      일주일 검색량: <span className="font-semibold text-clinicGreen-700">{item.search_volume.toLocaleString('ko-KR')}</span>
                     </span>
                   )}
                   {item.competition && (

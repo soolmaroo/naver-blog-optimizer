@@ -9,6 +9,7 @@ from datetime import datetime
 import httpx
 from bs4 import BeautifulSoup
 import re
+import asyncio
 
 router = APIRouter()
 
@@ -39,7 +40,7 @@ def save_learning_data(data: dict):
         raise HTTPException(status_code=500, detail=f"학습 데이터 저장 실패: {str(e)}")
 
 
-async def extract_blog_post_urls(blog_url: str, max_pages: int = 50) -> List[str]:
+async def extract_blog_post_urls(blog_url: str, max_pages: int = 50, cookies: Optional[str] = None) -> List[str]:
     """
     네이버 블로그에서 모든 포스트 URL을 추출합니다.
     페이지네이션을 통해 모든 페이지를 순회합니다.
@@ -47,6 +48,7 @@ async def extract_blog_post_urls(blog_url: str, max_pages: int = 50) -> List[str
     Args:
         blog_url: 블로그 메인 URL (예: https://blog.naver.com/username)
         max_pages: 최대 페이지 수 (기본값: 50)
+        cookies: 네이버 로그인 쿠키 (비공개 글 접근용, 선택사항)
     
     Returns:
         포스트 URL 목록
@@ -54,7 +56,7 @@ async def extract_blog_post_urls(blog_url: str, max_pages: int = 50) -> List[str
     post_urls = set()  # 중복 방지를 위해 set 사용
     
     try:
-        print(f"[블로그 URL 추출] 시작: {blog_url}")
+        print(f"[블로그 URL 추출] 시작: {blog_url} (쿠키 사용: {'예' if cookies else '아니오'})")
         
         # User-Agent 설정
         headers = {
@@ -63,6 +65,10 @@ async def extract_blog_post_urls(blog_url: str, max_pages: int = 50) -> List[str
             'Accept-Language': 'ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7',
             'Referer': 'https://blog.naver.com/'
         }
+        
+        # 쿠키 추가
+        if cookies:
+            headers['Cookie'] = cookies
         
         # 블로그 ID 추출
         blog_id_match = re.search(r'blog\.naver\.com/([^/?]+)', blog_url)
@@ -250,134 +256,203 @@ async def extract_blog_post_urls(blog_url: str, max_pages: int = 50) -> List[str
         return list(post_urls) if post_urls else []
 
 
-async def crawl_blog(url: str) -> str:
+async def crawl_blog(url: str, retry_count: int = 2, cookies: Optional[str] = None) -> str:
     """
     블로그 URL에서 텍스트를 크롤링합니다.
     네이버 블로그, 티스토리 등 지원
+    재시도 로직 포함
+    
+    Args:
+        url: 블로그 포스트 URL
+        retry_count: 재시도 횟수
+        cookies: 네이버 로그인 쿠키 (비공개 글 접근용, 선택사항)
     """
-    try:
-        print(f"[크롤링] 시작: {url}")
-        
-        # User-Agent 설정 (봇 차단 방지)
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
-        }
-        
-        async with httpx.AsyncClient(timeout=httpx.Timeout(10.0), follow_redirects=True) as client:
-            response = await client.get(url, headers=headers)
-            response.raise_for_status()
-            html = response.text
-        
-        soup = BeautifulSoup(html, 'html.parser')
-        
-        # 네이버 블로그 처리
-        if 'blog.naver.com' in url or 'm.blog.naver.com' in url:
-            # 네이버 블로그는 iframe 구조이므로 직접 본문 찾기
-            # 여러 가능한 선택자 시도
-            content_selectors = [
-                '#postViewArea',  # 일반적인 본문 영역
-                '.se-main-container',  # 스마트에디터
-                '.post-view',  # 구버전
-                '#postView',  # 다른 버전
-                '.post_ct',  # 또 다른 버전
-            ]
+    for attempt in range(retry_count + 1):
+        try:
+            print(f"[크롤링] 시도 {attempt + 1}/{retry_count + 1}: {url} (쿠키 사용: {'예' if cookies else '아니오'})")
             
-            content_text = ""
-            for selector in content_selectors:
-                content = soup.select_one(selector)
+            # User-Agent 설정 (봇 차단 방지)
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+                'Accept-Language': 'ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7',
+                'Referer': 'https://blog.naver.com/'
+            }
+            
+            # 쿠키 추가
+            if cookies:
+                headers['Cookie'] = cookies
+            
+            async with httpx.AsyncClient(timeout=httpx.Timeout(15.0), follow_redirects=True) as client:
+                response = await client.get(url, headers=headers)
+                response.raise_for_status()
+                html = response.text
+            
+            soup = BeautifulSoup(html, 'html.parser')
+            
+            # 네이버 블로그 처리
+            if 'blog.naver.com' in url or 'm.blog.naver.com' in url:
+                # 네이버 블로그는 iframe 구조이므로 직접 본문 찾기
+                # 여러 가능한 선택자 시도 (최신 구조 포함)
+                content_selectors = [
+                    '#postViewArea',  # 일반적인 본문 영역
+                    '.se-main-container',  # 스마트에디터
+                    '.se-component',  # 스마트에디터 컴포넌트
+                    '.se-section-text',  # 스마트에디터 텍스트 섹션
+                    '.post-view',  # 구버전
+                    '#postView',  # 다른 버전
+                    '.post_ct',  # 또 다른 버전
+                    '.post-content',  # 추가 선택자
+                    '.post-body',  # 추가 선택자
+                    'article',  # 시맨틱 태그
+                ]
+                
+                content_text = ""
+                for selector in content_selectors:
+                    content = soup.select_one(selector)
+                    if content:
+                        # 스크립트와 스타일 태그 제거
+                        for script in content(['script', 'style', 'noscript']):
+                            script.decompose()
+                        content_text = content.get_text(separator='\n', strip=True)
+                        if len(content_text) > 100:  # 충분한 텍스트가 있으면 사용
+                            print(f"[크롤링] 선택자 '{selector}'로 성공: {len(content_text)}자")
+                            break
+                
+                # iframe 내부 내용이 있는 경우 (모바일 버전 또는 최신 구조)
+                if not content_text or len(content_text) < 100:
+                    # 여러 iframe 찾기 시도
+                    iframes = soup.find_all('iframe')
+                    iframe_src_list = []
+                    
+                    for iframe in iframes:
+                        iframe_id = iframe.get('id', '')
+                        iframe_src = iframe.get('src') or iframe.get('data-src')
+                        # mainFrame 또는 postViewFrame 우선
+                        if iframe_id in ['mainFrame', 'postViewFrame'] or iframe_src:
+                            if iframe_src:
+                                iframe_src_list.append((iframe_id, iframe_src))
+                    
+                    # id='mainFrame' 우선, 없으면 첫 번째 iframe
+                    iframe_to_use = None
+                    for iframe_id, iframe_src in iframe_src_list:
+                        if iframe_id == 'mainFrame':
+                            iframe_to_use = iframe_src
+                            break
+                    if not iframe_to_use and iframe_src_list:
+                        iframe_to_use = iframe_src_list[0][1]
+                    
+                    if iframe_to_use:
+                        if not iframe_to_use.startswith('http'):
+                            iframe_url = 'https://blog.naver.com' + iframe_to_use
+                        else:
+                            iframe_url = iframe_to_use
+                        
+                        print(f"[크롤링] iframe URL 발견: {iframe_url}")
+                        try:
+                            async with httpx.AsyncClient(timeout=httpx.Timeout(15.0)) as iframe_client:
+                                iframe_response = await iframe_client.get(iframe_url, headers=headers)
+                                iframe_response.raise_for_status()
+                                iframe_html = iframe_response.text
+                                iframe_soup = BeautifulSoup(iframe_html, 'html.parser')
+                                
+                                for selector in content_selectors:
+                                    content = iframe_soup.select_one(selector)
+                                    if content:
+                                        for script in content(['script', 'style', 'noscript']):
+                                            script.decompose()
+                                        content_text = content.get_text(separator='\n', strip=True)
+                                        if len(content_text) > 100:
+                                            print(f"[크롤링] iframe 내부 '{selector}'로 성공: {len(content_text)}자")
+                                            break
+                        except Exception as e:
+                            print(f"[크롤링] iframe 크롤링 실패: {str(e)}")
+                            continue
+                
+                if content_text and len(content_text) > 50:
+                    print(f"[크롤링] 성공: {len(content_text)}자 추출")
+                    return content_text
+                else:
+                    # 전체 본문에서 텍스트 추출 시도 (최후의 수단)
+                    body = soup.find('body')
+                    if body:
+                        for script in body(['script', 'style', 'noscript', 'header', 'footer', 'nav', 'aside']):
+                            script.decompose()
+                        content_text = body.get_text(separator='\n', strip=True)
+                        # 너무 짧은 줄 제거 및 정리
+                        lines = [line.strip() for line in content_text.split('\n') if len(line.strip()) > 10]
+                        content_text = '\n'.join(lines)
+                        if len(content_text) > 100:
+                            print(f"[크롤링] body에서 텍스트 추출 성공: {len(content_text)}자")
+                            return content_text
+                    
+                    # 텍스트를 찾지 못한 경우 재시도
+                    if attempt < retry_count:
+                        await asyncio.sleep(1.0)
+                        continue
+                
+            # 티스토리 블로그 처리
+            elif 'tistory.com' in url:
+                content = soup.select_one('.entry-content, .article-content, #content')
                 if content:
-                    # 스크립트와 스타일 태그 제거
                     for script in content(['script', 'style', 'noscript']):
                         script.decompose()
                     content_text = content.get_text(separator='\n', strip=True)
-                    if len(content_text) > 100:  # 충분한 텍스트가 있으면 사용
-                        break
-            
-            # iframe 내부 내용이 있는 경우 (모바일 버전)
-            if not content_text or len(content_text) < 100:
-                iframe = soup.find('iframe', id='mainFrame')
-                if iframe and iframe.get('src'):
-                    iframe_url = iframe['src']
-                    if not iframe_url.startswith('http'):
-                        iframe_url = 'https://blog.naver.com' + iframe_url
-                    
-                    print(f"[크롤링] iframe URL 발견: {iframe_url}")
-                    async with httpx.AsyncClient(timeout=httpx.Timeout(10.0)) as iframe_client:
-                        iframe_response = await iframe_client.get(iframe_url, headers=headers)
-                        iframe_response.raise_for_status()
-                        iframe_html = iframe_response.text
-                        iframe_soup = BeautifulSoup(iframe_html, 'html.parser')
-                        
-                        for selector in content_selectors:
-                            content = iframe_soup.select_one(selector)
-                            if content:
-                                for script in content(['script', 'style', 'noscript']):
-                                    script.decompose()
-                                content_text = content.get_text(separator='\n', strip=True)
-                                if len(content_text) > 100:
-                                    break
-            
-            if content_text and len(content_text) > 50:
-                print(f"[크롤링] 성공: {len(content_text)}자 추출")
-                return content_text
-            else:
-                # 전체 본문에서 텍스트 추출 시도
-                body = soup.find('body')
-                if body:
-                    for script in body(['script', 'style', 'noscript', 'header', 'footer', 'nav']):
-                        script.decompose()
-                    content_text = body.get_text(separator='\n', strip=True)
-                    # 너무 짧은 줄 제거
-                    lines = [line for line in content_text.split('\n') if len(line.strip()) > 10]
-                    content_text = '\n'.join(lines)
-                    if len(content_text) > 100:
-                        print(f"[크롤링] 성공 (전체 본문): {len(content_text)}자 추출")
+                    if len(content_text) > 50:
+                        print(f"[크롤링] 성공 (티스토리): {len(content_text)}자 추출")
                         return content_text
-        
-        # 티스토리 블로그 처리
-        elif 'tistory.com' in url:
-            content = soup.select_one('.entry-content, .article-content, #content')
-            if content:
-                for script in content(['script', 'style', 'noscript']):
+            
+            # 일반적인 블로그 처리 (article, main 태그 등)
+            article = soup.find('article') or soup.find('main') or soup.find(class_=re.compile(r'content|post|article', re.I))
+            if article:
+                for script in article(['script', 'style', 'noscript']):
                     script.decompose()
-                content_text = content.get_text(separator='\n', strip=True)
-                if len(content_text) > 50:
-                    print(f"[크롤링] 성공 (티스토리): {len(content_text)}자 추출")
+                content_text = article.get_text(separator='\n', strip=True)
+                if len(content_text) > 100:
+                    print(f"[크롤링] 성공 (일반): {len(content_text)}자 추출")
                     return content_text
+            
+            # 최후의 수단: body 전체에서 텍스트 추출
+            body = soup.find('body')
+            if body:
+                for script in body(['script', 'style', 'noscript', 'header', 'footer', 'nav', 'aside']):
+                    script.decompose()
+                content_text = body.get_text(separator='\n', strip=True)
+                lines = [line.strip() for line in content_text.split('\n') if len(line.strip()) > 10]
+                content_text = '\n'.join(lines)
+                if len(content_text) > 100:
+                    print(f"[크롤링] 성공 (body 전체): {len(content_text)}자 추출")
+                    return content_text
+            
+            # 텍스트를 찾지 못한 경우 재시도
+            if attempt < retry_count:
+                await asyncio.sleep(1.0)
+                continue
+            else:
+                print(f"[크롤링] 텍스트를 찾을 수 없습니다: {url}")
+                return ""
         
-        # 일반적인 블로그 처리 (article, main 태그 등)
-        article = soup.find('article') or soup.find('main') or soup.find(class_=re.compile(r'content|post|article', re.I))
-        if article:
-            for script in article(['script', 'style', 'noscript']):
-                script.decompose()
-            content_text = article.get_text(separator='\n', strip=True)
-            if len(content_text) > 100:
-                print(f"[크롤링] 성공 (일반): {len(content_text)}자 추출")
-                return content_text
-        
-        # 최후의 수단: body 전체에서 텍스트 추출
-        body = soup.find('body')
-        if body:
-            for script in body(['script', 'style', 'noscript', 'header', 'footer', 'nav', 'aside']):
-                script.decompose()
-            content_text = body.get_text(separator='\n', strip=True)
-            lines = [line for line in content_text.split('\n') if len(line.strip()) > 10]
-            content_text = '\n'.join(lines)
-            if len(content_text) > 100:
-                print(f"[크롤링] 성공 (body 전체): {len(content_text)}자 추출")
-                return content_text
-        
-        raise Exception("블로그 본문을 찾을 수 없습니다.")
-        
-    except httpx.HTTPStatusError as e:
-        print(f"[크롤링] HTTP 오류: {e.response.status_code}")
-        raise Exception(f"블로그를 불러올 수 없습니다. (HTTP {e.response.status_code})")
-    except httpx.TimeoutException:
-        print(f"[크롤링] 타임아웃")
-        raise Exception("블로그 로딩 시간이 초과되었습니다.")
-    except Exception as e:
-        print(f"[크롤링] 오류: {str(e)}")
-        raise Exception(f"블로그 크롤링 실패: {str(e)}")
+        except httpx.HTTPStatusError as e:
+            print(f"[크롤링] HTTP 오류: {e.response.status_code}")
+            if attempt < retry_count:
+                await asyncio.sleep(1.0)
+                continue
+            raise Exception(f"블로그를 불러올 수 없습니다. (HTTP {e.response.status_code})")
+        except httpx.TimeoutException:
+            print(f"[크롤링] 타임아웃")
+            if attempt < retry_count:
+                await asyncio.sleep(2.0)
+                continue
+            raise Exception("블로그 로딩 시간이 초과되었습니다.")
+        except Exception as e:
+            print(f"[크롤링] 오류: {str(e)}")
+            if attempt < retry_count:
+                await asyncio.sleep(1.0)
+                continue
+            raise Exception(f"블로그 크롤링 실패: {str(e)}")
+    
+    # 모든 재시도 실패
+    return ""
 
 # Gemini API 설정은 요청 시마다 확인
 def configure_gemini():
@@ -408,12 +483,25 @@ class DraftResponse(BaseModel):
 class ImageRequest(BaseModel):
     prompt: str
     context: Optional[str] = None
+    article_text: Optional[str] = None  # 현재 글 내용 (컨텍스트용)
 
 
 class ImageResponse(BaseModel):
     prompt: str
     image_url: Optional[str] = None
     preview_url: Optional[str] = None
+    markdown: str  # 마크다운 형식으로 삽입할 이미지 코드
+
+
+class TableRequest(BaseModel):
+    description: str  # 표에 들어갈 내용 설명
+    context: Optional[str] = None  # 현재 글 내용 (컨텍스트용)
+    table_type: Optional[str] = "statistics"  # statistics, anatomy, comparison 등
+
+
+class TableResponse(BaseModel):
+    markdown: str  # 마크다운 형식의 표
+    html: Optional[str] = None  # HTML 형식의 표 (선택사항)
 
 
 class BlogCrawlRequest(BaseModel):
@@ -434,6 +522,7 @@ class LearningDataRequest(BaseModel):
     blog_main_url: Optional[str] = None  # 블로그 메인 URL (모든 포스트 자동 추출)
     personal_info: Optional[str] = None  # 개인 정보
     clinic_info: Optional[str] = None  # 한의원 정보
+    cookies: Optional[str] = None  # 네이버 로그인 쿠키 (비공개 글 접근용)
 
 
 class LearningDataResponse(BaseModel):
@@ -454,9 +543,10 @@ class RevisionResponse(BaseModel):
     revised_draft: str  # 퇴고된 초안
     word_count: int  # 글자 수
     learning_saved: bool  # 학습 데이터에 저장되었는지 여부
+    medical_violations: list[str] = []  # 의료법 위반 단어/문장 목록
 
 
-# 의료법 위반 단어 목록
+# 의료법 위반 단어 목록 (기본 검사용)
 MEDICAL_VIOLATION_WORDS = [
     "완치", "치료", "100%", "보장", "확실", "무조건",
     "최고", "최강", "유일", "독점", "비밀", "특허",
@@ -464,12 +554,98 @@ MEDICAL_VIOLATION_WORDS = [
 ]
 
 
+async def check_medical_violations_with_gemini(text: str) -> list[str]:
+    """
+    제미나이를 사용하여 의료법 위반 가능성을 검사합니다.
+    광고법 및 의료법 위반 사례를 학습한 AI가 더 정확한 검사를 수행합니다.
+    """
+    try:
+        settings = get_settings()
+        if not settings.google_api_key:
+            print("[의료법 검사] Gemini API 키가 없어 기본 검사만 수행합니다.")
+            return check_medical_violations(text)
+        
+        configure_gemini()
+        
+        # 제미나이 모델 선택
+        try:
+            model_names = [
+                'gemini-1.5-flash-latest',
+                'gemini-1.5-pro-latest',
+                'gemini-1.5-flash',
+                'gemini-1.5-pro',
+            ]
+            model = None
+            for model_name in model_names:
+                try:
+                    model = genai.GenerativeModel(model_name)
+                    break
+                except Exception:
+                    continue
+            
+            if model is None:
+                print("[의료법 검사] 모델을 찾을 수 없어 기본 검사만 수행합니다.")
+                return check_medical_violations(text)
+        except Exception as e:
+            print(f"[의료법 검사] 모델 초기화 실패: {str(e)}")
+            return check_medical_violations(text)
+        
+        # 의료법 위반 검사 프롬프트
+        prompt = f"""당신은 의료광고법 및 의료법 전문가입니다. 다음 블로그 글을 검토하여 의료법 위반 소지가 있는 부분을 찾아주세요.
+
+[검사할 블로그 글]
+{text}
+
+[의료법 위반 기준]
+1. 치료 효과에 대한 과장된 표현 (완치, 100% 효과, 보장 등)
+2. 다른 의료기관이나 치료법에 대한 비방
+3. 건강상 위험을 조성하는 표현
+4. 의료진의 경력이나 자격에 대한 허위/과장
+5. 시술 전후 사진이나 사례에 대한 허위/과장
+6. 가격에 대한 허위/과장
+7. 치료 효과를 보장하거나 확실히 한다는 표현
+8. 경쟁 의료기관과 비교하여 우월함을 주장
+9. 비과학적이거나 허위의 정보 제공
+10. 질병의 발생 또는 악화를 조장하는 표현
+
+[검사 지시사항]
+- 위반 소지가 있는 단어, 문장, 표현을 정확히 찾아주세요.
+- 위반 소지가 있는 부분만 간단하게 나열해주세요 (한 줄에 하나씩).
+- 위반 사항이 없으면 "위반 사항 없음"이라고만 답변하세요.
+- 의심스러운 부분이지만 명확하지 않은 경우는 포함하지 마세요.
+- 전문적이고 객관적으로 판단해주세요.
+
+위반 소지가 있는 부분:"""
+
+        response = model.generate_content(prompt)
+        result = response.text.strip()
+        
+        # 결과 파싱
+        violations = []
+        if result and result != "위반 사항 없음" and "위반 사항 없음" not in result:
+            # 줄바꿈으로 구분된 위반 사항들을 리스트로 변환
+            lines = [line.strip() for line in result.split('\n') if line.strip()]
+            for line in lines:
+                # 불필요한 접두사 제거 (예: "- ", "1. ", 등)
+                cleaned = line.lstrip('0123456789.-) ').strip()
+                if cleaned and cleaned != "위반 사항 없음":
+                    violations.append(cleaned)
+        
+        print(f"[의료법 검사] Gemini 검사 완료: {len(violations)}개 위반 사항 발견")
+        return violations
+        
+    except Exception as e:
+        print(f"[의료법 검사] Gemini 검사 실패: {str(e)}")
+        # Gemini 검사 실패 시 기본 검사 사용
+        return check_medical_violations(text)
+
+
 def check_medical_violations(text: str) -> list[str]:
-    """의료법 위반 단어 검사"""
+    """의료법 위반 단어 검사 (기본 검사)"""
     violations = []
     text_lower = text.lower()
     for word in MEDICAL_VIOLATION_WORDS:
-        if word in text_lower:
+        if word.lower() in text_lower:
             violations.append(word)
     return violations
 
@@ -695,7 +871,7 @@ async def generate_draft(request: DraftRequest) -> DraftResponse:
         draft_text = response.text
         
         # 의료법 위반 단어 검사
-        violations = check_medical_violations(draft_text)
+        violations = await check_medical_violations_with_gemini(draft_text)
         
         return DraftResponse(
             topic=request.topic,
@@ -714,8 +890,9 @@ async def generate_draft(request: DraftRequest) -> DraftResponse:
 @router.post("/ai/image", response_model=ImageResponse)
 async def generate_image(request: ImageRequest) -> ImageResponse:
     """
-    Gemini API를 사용한 이미지 생성 (향후 구현)
-    현재는 플레이스홀더 반환
+    Gemini API를 사용한 이미지 생성 프롬프트 생성 및 이미지 생성
+    Gemini가 이미지를 직접 생성하지 않으므로, 이미지 생성 프롬프트를 생성하고
+    이를 기반으로 이미지 생성 서비스를 호출합니다.
     """
     # 매번 최신 설정 로드
     settings = get_settings()
@@ -725,12 +902,289 @@ async def generate_image(request: ImageRequest) -> ImageResponse:
             detail="Gemini API key가 설정되지 않았습니다."
         )
     
-    # Gemini는 현재 이미지 생성 기능이 제한적이므로
-    # 향후 이미지 생성 API 연동 시 구현
-    return ImageResponse(
-        prompt=request.prompt,
-        preview_url=f"https://placehold.co/800x450/46875a/ffffff?text={request.prompt.replace(' ', '+')}"
-    )
+    configure_gemini()
+    
+    try:
+        # 사용 가능한 모델 찾기
+        model_names = [
+            'gemini-1.5-flash-latest',
+            'gemini-1.5-pro-latest',
+            'gemini-1.5-flash',
+            'gemini-1.5-pro',
+        ]
+        model = None
+        for model_name in model_names:
+            try:
+                model = genai.GenerativeModel(model_name)
+                break
+            except Exception:
+                continue
+        
+        if model is None:
+            raise HTTPException(
+                status_code=500,
+                detail="사용 가능한 Gemini 모델을 찾을 수 없습니다."
+            )
+        
+        # 이미지 생성 프롬프트 생성
+        context_text = f"\n[현재 글 내용]\n{request.article_text}" if request.article_text else ""
+        
+        prompt = f"""다음은 블로그 글에 삽입할 이미지를 생성하기 위한 요청입니다.
+
+[사용자 요청]
+{request.prompt}
+{context_text}
+
+[요구사항]
+1. 블로그 글에 적합한 이미지를 생성하기 위한 상세한 프롬프트를 작성해주세요.
+2. 한의원, 추나요법, 건강 관련 주제에 적합한 이미지여야 합니다.
+3. 의료법을 준수하며, 과장되거나 허위 정보를 담지 않아야 합니다.
+4. 전문적이고 신뢰감 있는 이미지여야 합니다.
+
+[출력 형식]
+다음 형식으로만 답변해주세요:
+프롬프트: [이미지 생성 프롬프트 (영어로 작성)]
+
+이미지 생성 프롬프트:"""
+        
+        response = model.generate_content(prompt)
+        result = response.text.strip()
+        
+        # 프롬프트 추출
+        image_prompt = result
+        if "프롬프트:" in result:
+            image_prompt = result.split("프롬프트:")[-1].strip()
+        
+        # 이미지 생성 - Gemini NanoBanana API 사용
+        # google-generativeai 라이브러리의 ImageGenerationModel 사용 (엔드포인트 찾을 필요 없음!)
+        image_url = None
+        
+        # 방법 1: google-generativeai 라이브러리 사용 (추천 - 간단하고 안정적)
+        try:
+            print(f"[이미지 생성] Gemini ImageGenerationModel로 이미지 생성 시도: {image_prompt[:50]}...")
+            
+            # ImageGenerationModel 사용 (엔드포인트를 직접 찾을 필요 없음!)
+            # 사용 가능한 모델: imagen-3.0-generate-001, imagen-3.0-generate-002 등
+            imagen_model = genai.ImageGenerationModel("imagen-3.0-generate-001")
+            
+            # 이미지 생성
+            # 참고: generate_images는 동기 함수이므로 asyncio.to_thread로 비동기 실행
+            import asyncio
+            import base64
+            
+            def generate_image_sync():
+                """동기 함수로 이미지 생성"""
+                try:
+                    result = imagen_model.generate_images(
+                        prompt=image_prompt,
+                        number_of_images=1,
+                        aspect_ratio="16:9"  # 또는 "1:1", "9:16"
+                    )
+                    return result
+                except Exception as e:
+                    print(f"[이미지 생성] ImageGenerationModel 오류: {str(e)}")
+                    return None
+            
+            # 비동기로 실행
+            result = await asyncio.to_thread(generate_image_sync)
+            
+            if result and len(result.images) > 0:
+                # 이미지가 PIL.Image 객체로 반환됨
+                image = result.images[0]
+                
+                # PIL Image를 base64로 변환
+                from io import BytesIO
+                buffer = BytesIO()
+                image.save(buffer, format="PNG")
+                image_bytes = buffer.getvalue()
+                image_base64 = base64.b64encode(image_bytes).decode('utf-8')
+                
+                # base64 데이터 URL 생성
+                image_url = f"data:image/png;base64,{image_base64}"
+                print(f"[이미지 생성] Gemini ImageGenerationModel 성공!")
+            else:
+                print(f"[이미지 생성] ImageGenerationModel에서 이미지를 생성하지 못했습니다.")
+        
+        except Exception as e:
+            print(f"[이미지 생성] ImageGenerationModel 실패: {str(e)}")
+            import traceback
+            print(traceback.format_exc())
+        
+        # 방법 2: Vertex AI Imagen 사용 (위 방법이 실패한 경우)
+        if not image_url:
+            try:
+                print(f"[이미지 생성] Vertex AI Imagen 시도...")
+                # Vertex AI는 별도 설정이 필요하므로 주석 처리
+                # 필요시 아래 주석을 해제하고 설정하세요
+                # from google.cloud import aiplatform
+                # from vertexai.preview import imaging
+                # aiplatform.init(project="your-project-id", location="us-central1")
+                # imagen_model = imaging.ImagenModel.from_pretrained("imagegeneration@006")
+                # response = imagen_model.generate_images(
+                #     prompt=image_prompt,
+                #     number_of_images=1,
+                #     aspect_ratio="16:9"
+                # )
+                # image_url = response.images[0]._image_bytes
+                pass
+            except Exception as e:
+                print(f"[이미지 생성] Vertex AI 실패: {str(e)}")
+        
+        # 방법 3: 플레이스홀더 사용 (모든 방법 실패 시)
+        if not image_url:
+            print(f"[이미지 생성] 플레이스홀더 사용 (실제 이미지 생성 실패)")
+            image_url = f"https://placehold.co/800x450/46875a/ffffff?text={image_prompt.replace(' ', '+')[:50]}"
+        
+        # 마크다운 형식으로 이미지 삽입 코드 생성
+        markdown = f"![{request.prompt}]({image_url})"
+        
+        return ImageResponse(
+            prompt=image_prompt,
+            image_url=image_url,
+            preview_url=image_url,
+            markdown=markdown
+        )
+    
+    except Exception as e:
+        print(f"[이미지 생성] 오류: {str(e)}")
+        import traceback
+        print(traceback.format_exc())
+        raise HTTPException(
+            status_code=500,
+            detail=f"이미지 생성 중 오류가 발생했습니다: {str(e)}"
+        )
+
+
+@router.post("/ai/table", response_model=TableResponse)
+async def generate_table(request: TableRequest) -> TableResponse:
+    """
+    Gemini API를 사용한 표 생성
+    통계 자료, 해부학 그림 설명, 비교표 등을 생성합니다.
+    """
+    # 매번 최신 설정 로드
+    settings = get_settings()
+    if not settings.google_api_key:
+        raise HTTPException(
+            status_code=501,
+            detail="Gemini API key가 설정되지 않았습니다."
+        )
+    
+    configure_gemini()
+    
+    try:
+        # 사용 가능한 모델 찾기
+        model_names = [
+            'gemini-1.5-flash-latest',
+            'gemini-1.5-pro-latest',
+            'gemini-1.5-flash',
+            'gemini-1.5-pro',
+        ]
+        model = None
+        for model_name in model_names:
+            try:
+                model = genai.GenerativeModel(model_name)
+                break
+            except Exception:
+                continue
+        
+        if model is None:
+            raise HTTPException(
+                status_code=500,
+                detail="사용 가능한 Gemini 모델을 찾을 수 없습니다."
+            )
+        
+        # 표 타입별 프롬프트 설정
+        table_type_prompts = {
+            "statistics": "통계 자료 표",
+            "anatomy": "해부학 관련 설명 표",
+            "comparison": "비교 표",
+            "treatment": "치료 방법 비교 표",
+            "symptom": "증상별 설명 표"
+        }
+        
+        table_type_desc = table_type_prompts.get(request.table_type, "표")
+        context_text = f"\n[현재 글 내용]\n{request.context}" if request.context else ""
+        
+        prompt = f"""다음은 블로그 글에 삽입할 {table_type_desc}를 생성하기 위한 요청입니다.
+
+[사용자 요청]
+{request.description}
+{context_text}
+
+[요구사항]
+1. 마크다운 형식의 표를 생성해주세요.
+2. 한의원, 추나요법, 건강 관련 주제에 적합한 내용이어야 합니다.
+3. 의료법을 준수하며, 과장되거나 허위 정보를 담지 않아야 합니다.
+4. 전문적이고 신뢰감 있는 자료여야 합니다.
+5. 표는 최소 3행 이상, 적절한 열 구조를 가져야 합니다.
+6. 표 헤더는 명확하고 이해하기 쉬워야 합니다.
+
+[출력 형식]
+마크다운 표 형식으로만 답변해주세요. 예시:
+| 항목 | 설명 | 비고 |
+|------|------|------|
+| 항목1 | 설명1 | 비고1 |
+| 항목2 | 설명2 | 비고2 |
+
+표:"""
+        
+        response = model.generate_content(prompt)
+        table_markdown = response.text.strip()
+        
+        # 마크다운에서 표 부분만 추출 (표가 여러 개일 경우 첫 번째만)
+        lines = table_markdown.split('\n')
+        table_lines = []
+        in_table = False
+        
+        for line in lines:
+            # 표 시작 감지 (|로 시작하는 줄)
+            if '|' in line and not in_table:
+                in_table = True
+                table_lines.append(line)
+            elif in_table:
+                if '|' in line:
+                    table_lines.append(line)
+                elif line.strip() == '':
+                    # 빈 줄이면 표 종료
+                    break
+                else:
+                    # 표가 아닌 내용이 나오면 종료
+                    break
+        
+        if table_lines:
+            table_markdown = '\n'.join(table_lines)
+        
+        # HTML 형식도 생성 (선택사항)
+        # 간단한 HTML 표 생성
+        html_table = None
+        if table_lines and len(table_lines) >= 2:
+            html_lines = ['<table class="table-auto border-collapse border border-slate-400 w-full">']
+            for i, line in enumerate(table_lines):
+                if '|' in line:
+                    cells = [cell.strip() for cell in line.split('|') if cell.strip()]
+                    if cells:
+                        tag = 'th' if i == 0 or (i == 1 and '---' in line) else 'td'
+                        if '---' not in line:
+                            html_lines.append('  <tr>')
+                            for cell in cells:
+                                html_lines.append(f'    <{tag} class="border border-slate-300 px-4 py-2">{cell}</{tag}>')
+                            html_lines.append('  </tr>')
+            html_lines.append('</table>')
+            html_table = '\n'.join(html_lines)
+        
+        return TableResponse(
+            markdown=table_markdown,
+            html=html_table
+        )
+    
+    except Exception as e:
+        print(f"[표 생성] 오류: {str(e)}")
+        import traceback
+        print(traceback.format_exc())
+        raise HTTPException(
+            status_code=500,
+            detail=f"표 생성 중 오류가 발생했습니다: {str(e)}"
+        )
 
 
 @router.post("/ai/crawl-blog-urls", response_model=BlogCrawlResponse)
@@ -776,9 +1230,9 @@ async def crawl_blog_urls(request: BlogCrawlRequest) -> BlogCrawlResponse:
 @router.post("/ai/check-violations")
 async def check_violations(text: str) -> dict:
     """
-    텍스트의 의료법 위반 단어 검사
+    텍스트의 의료법 위반 검사 (제미나이 사용)
     """
-    violations = check_medical_violations(text)
+    violations = await check_medical_violations_with_gemini(text)
     return {
         "text": text,
         "violations": violations,
@@ -808,8 +1262,13 @@ async def learn_writing_style(request: LearningDataRequest) -> LearningDataRespo
         if request.blog_main_url:
             try:
                 print(f"[학습] 블로그 메인 URL에서 포스트 추출 시작: {request.blog_main_url}")
-                post_urls = await extract_blog_post_urls(request.blog_main_url.strip(), max_pages=100)
-                if post_urls:
+                # 148개 글이 있으므로 충분히 큰 페이지 수로 설정 (페이지당 약 10개 가정)
+                post_urls = await extract_blog_post_urls(
+                    request.blog_main_url.strip(), 
+                    max_pages=200,  # 충분히 큰 페이지 수로 설정
+                    cookies=request.cookies
+                )
+                if post_urls and len(post_urls) > 0:
                     all_blog_urls.extend(post_urls)
                     print(f"[학습] {len(post_urls)}개의 포스트 URL 추출 완료")
                 else:
@@ -817,8 +1276,12 @@ async def learn_writing_style(request: LearningDataRequest) -> LearningDataRespo
                     # 포스트 URL을 찾지 못하면 메인 URL 자체를 크롤링 시도
                     all_blog_urls.append(request.blog_main_url.strip())
             except Exception as e:
-                print(f"[학습] 블로그 메인 URL 크롤링 실패: {str(e)}")
-                # 실패해도 계속 진행
+                print(f"[학습] 블로그 메인 URL 포스트 추출 실패: {str(e)}")
+                import traceback
+                print(traceback.format_exc())
+                # 실패해도 메인 URL 자체를 크롤링 시도
+                print(f"[학습] 메인 URL 자체를 크롤링 시도합니다.")
+                all_blog_urls.append(request.blog_main_url.strip())
         
         # 기존 블로그 URL 목록 추가
         if request.blog_urls:
@@ -827,22 +1290,30 @@ async def learn_writing_style(request: LearningDataRequest) -> LearningDataRespo
         # 블로그 URL 크롤링
         if all_blog_urls:
             print(f"[학습] 총 {len(all_blog_urls)}개의 URL 크롤링 시작")
+            success_count = 0
+            fail_count = 0
+            
             for i, url in enumerate(all_blog_urls, 1):
                 if url.strip():
                     try:
                         print(f"[학습] [{i}/{len(all_blog_urls)}] URL 크롤링 시작: {url}")
-                        text = await crawl_blog(url.strip())
+                        text = await crawl_blog(url.strip(), cookies=request.cookies)
                         if text and len(text.strip()) > 50:
                             extracted_texts.append(text.strip())
-                            print(f"[학습] URL에서 텍스트 추출 성공: {len(text)}자")
+                            success_count += 1
+                            print(f"[학습] URL에서 텍스트 추출 성공: {len(text)}자 (성공: {success_count}, 실패: {fail_count})")
                         else:
-                            print(f"[학습] URL에서 추출한 텍스트가 너무 짧음: {len(text) if text else 0}자")
+                            fail_count += 1
+                            print(f"[학습] URL에서 추출한 텍스트가 너무 짧음: {len(text) if text else 0}자 (성공: {success_count}, 실패: {fail_count})")
                         # API 제한 방지를 위해 요청 간 간격
                         if i < len(all_blog_urls):
                             await asyncio.sleep(0.5)
                     except Exception as e:
-                        print(f"[학습] URL 크롤링 실패 ({url}): {str(e)}")
+                        fail_count += 1
+                        print(f"[학습] URL 크롤링 실패 ({url}): {str(e)} (성공: {success_count}, 실패: {fail_count})")
                         # URL 크롤링 실패해도 계속 진행
+            
+            print(f"[학습] 크롤링 완료: 성공 {success_count}개, 실패 {fail_count}개, 총 {len(extracted_texts)}개 텍스트 추출")
         
         # 직접 입력한 블로그 텍스트 추가
         if request.blog_texts:
@@ -875,7 +1346,7 @@ async def learn_writing_style(request: LearningDataRequest) -> LearningDataRespo
         if request.blog_urls:
             message_parts.append(f"{len(request.blog_urls)}개의 개별 포스트 URL")
         if request.blog_texts:
-            message_parts.append(f"{len(request.blog_texts)}개의 직접 입력 텍스트")
+            message_parts.append(f"{len(request.blog_texts)}개의 직접 입력 텍스트 (통으로 학습)")
         
         message = f"{', '.join(message_parts)}가 학습되었습니다. (총 {len(extracted_texts)}개 텍스트 추출)"
         
@@ -1044,10 +1515,12 @@ async def revise_draft(request: RevisionRequest) -> RevisionResponse:
         response = model.generate_content(prompt)
         revised_text = response.text
         
-        # 의료법 위반 단어 검사
-        violations = check_medical_violations(revised_text)
+        # 의료법 위반 검사 (제미나이 사용)
+        violations = await check_medical_violations_with_gemini(revised_text)
         if violations:
-            print(f"[퇴고] 의료법 위반 단어 감지: {violations}")
+            print(f"[퇴고] 의료법 위반 소지 감지: {violations}")
+        else:
+            print(f"[퇴고] 의료법 위반 사항 없음")
         
         # 퇴고 학습 데이터 저장
         learning_saved = False
@@ -1104,7 +1577,8 @@ async def revise_draft(request: RevisionRequest) -> RevisionResponse:
         return RevisionResponse(
             revised_draft=revised_text,
             word_count=len(revised_text),
-            learning_saved=learning_saved
+            learning_saved=learning_saved,
+            medical_violations=violations
         )
     
     except Exception as e:
