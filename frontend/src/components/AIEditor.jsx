@@ -3,10 +3,10 @@ import { useState, useEffect } from 'react';
 const API_BASE_URL = 'http://127.0.0.1:8000/api';
 
 export default function AIEditor() {
-  const [topic, setTopic] = useState('');
-  const [keywords, setKeywords] = useState('');
-  const [writingInstruction, setWritingInstruction] = useState(''); // 글쓰기 지시사항 (구조, 길이, 타겟, 키워드 배치 등)
-  const [contentInstruction, setContentInstruction] = useState(''); // 글의 내용 지시사항 (구체적인 사건, 경험 등)
+  const [topic, setTopic] = useState('손목통증');
+  const [keywords, setKeywords] = useState('문정역 한의원, 문정역 교통사고 한의원');
+  const [writingInstruction, setWritingInstruction] = useState('글의 구조는 서론 - 본론 - 결론으로 자연스럽게 이어지면서 키워드를 넣을 수 있게. 추나 하다가 손목이 나가서 부원장에게 치료 받았는데, 이걸 앞뒤 살을 잘 붙여서 이런저런 이야기가 조금 더 들어가게 꾸며줘. 손목 통증에 대한 전문 자료 하나 넣고, 손목 통증에 대한 자료에서 나온 걸 표로 하나 넣고, 사진이나 일러스트도 하나 넣어줘. 사진이나 일러스트는 못찾으면 적당히 생성해서 넣어줘.'); // 글쓰기 지시사항 (구조, 길이, 타겟, 키워드 배치 등)
+  const [contentInstruction, setContentInstruction] = useState('박원장이 추나하다가 손목 다친 이야기'); // 글의 내용 지시사항 (구체적인 사건, 경험 등)
   const [draft, setDraft] = useState('');
   const [violations, setViolations] = useState([]);
   const [loading, setLoading] = useState(false);
@@ -50,6 +50,10 @@ export default function AIEditor() {
       setLoading(true);
       const keywordList = keywords.split(',').map(k => k.trim()).filter(k => k);
       
+      // 타임아웃 설정 (120초 = 2분)
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 120000);
+      
       const response = await fetch(`${API_BASE_URL}/ai/draft`, {
         method: 'POST',
         headers: {
@@ -63,7 +67,10 @@ export default function AIEditor() {
           tone: style, // 'diary', 'blog', 'essay', 'personal'
           length: 'medium'
         }),
+        signal: controller.signal
       });
+
+      clearTimeout(timeoutId);
 
       if (!response.ok) {
         const error = await response.json();
@@ -82,7 +89,11 @@ export default function AIEditor() {
       // 내용 지시사항은 유지 (재사용 가능)
     } catch (error) {
       console.error('초안 생성 실패:', error);
-      alert(error.message || '초안 생성 중 오류가 발생했습니다.');
+      if (error.name === 'AbortError') {
+        alert('초안 생성 시간이 초과되었습니다 (2분). 이미지 생성 요청이 포함되어 있으면 제거하고 다시 시도해주세요.');
+      } else {
+        alert(error.message || '초안 생성 중 오류가 발생했습니다.');
+      }
     } finally {
       setLoading(false);
     }
@@ -333,6 +344,10 @@ export default function AIEditor() {
         articleText = finalDraft;
       }
       
+      // 이미지 생성은 시간이 오래 걸릴 수 있으므로 타임아웃을 5분으로 설정
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 300000); // 5분
+      
       const response = await fetch(`${API_BASE_URL}/ai/image`, {
         method: 'POST',
         headers: {
@@ -342,7 +357,10 @@ export default function AIEditor() {
           prompt: imagePrompt.trim(),
           article_text: articleText,
         }),
+        signal: controller.signal
       });
+
+      clearTimeout(timeoutId);
 
       if (!response.ok) {
         const error = await response.json();
@@ -360,7 +378,11 @@ export default function AIEditor() {
       alert('이미지가 삽입되었습니다!');
     } catch (error) {
       console.error('이미지 생성 실패:', error);
-      alert(error.message || '이미지 생성 중 오류가 발생했습니다.');
+      if (error.name === 'AbortError') {
+        alert('이미지 생성 시간이 초과되었습니다 (5분). 이미지 생성은 시간이 오래 걸릴 수 있습니다. 다시 시도해주세요.');
+      } else {
+        alert(error.message || '이미지 생성 중 오류가 발생했습니다.');
+      }
     } finally {
       setInsertingImage(false);
     }
@@ -699,7 +721,32 @@ export default function AIEditor() {
 
       {/* 글쓰기 에디터 */}
       <div className="rounded-xl border border-slate-200 bg-white p-6">
-        <h3 className="mb-4 text-lg font-semibold text-clinicGreen-700">AI 글쓰기 에디터</h3>
+        <div className="mb-4 flex items-center justify-between">
+          <h3 className="text-lg font-semibold text-clinicGreen-700">AI 글쓰기 에디터</h3>
+          <button
+            onClick={() => {
+              if (confirm('모든 입력 내용을 초기화하시겠습니까?')) {
+                setTopic('');
+                setKeywords('');
+                setWritingInstruction('');
+                setContentInstruction('');
+                setDraft('');
+                setRevisedDraft('');
+                setFinalDraft('');
+                setRevisionInstruction('');
+                setViolations([]);
+                setRevisedViolations([]);
+                setWordCount(0);
+                setContextMenu(null);
+                setContextMenuTarget(null);
+              }
+            }}
+            className="rounded-lg bg-slate-100 px-3 py-1.5 text-sm font-medium text-slate-700 hover:bg-slate-200 transition-colors"
+            title="모든 입력 내용 초기화"
+          >
+            🔄 초기화
+          </button>
+        </div>
         
         <div className="mb-4 space-y-3">
         <div>

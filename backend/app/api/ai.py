@@ -867,8 +867,31 @@ async def generate_draft(request: DraftRequest) -> DraftResponse:
         
         prompt = "\n".join(prompt_parts)
         
-        response = model.generate_content(prompt)
-        draft_text = response.text
+        # 프롬프트에서 이미지 생성 요청 감지 및 제거
+        # 이미지 생성은 별도 API로 처리하므로 초안 생성 프롬프트에서는 제거
+        image_keywords = ['그림', '이미지', '사진', '그래프', '차트', '표', '이미지 생성', '그림 생성', '사진 생성']
+        has_image_request = any(keyword in prompt for keyword in image_keywords)
+        
+        if has_image_request:
+            print("[AI] 프롬프트에 이미지 생성 요청이 포함되어 있습니다. 초안 생성에서는 텍스트만 생성합니다.")
+            # 프롬프트에 명시적으로 이미지 생성은 하지 않는다고 추가
+            prompt += "\n\n⚠️ 중요: 초안 생성 시 이미지나 그림은 생성하지 마세요. 텍스트만 작성하세요. 이미지가 필요하면 초안 완성 후 별도로 추가할 수 있습니다."
+        
+        # Gemini API 호출에 타임아웃 설정 (90초)
+        print(f"[AI] Gemini API 호출 시작 (타임아웃: 90초)")
+        try:
+            response = await asyncio.wait_for(
+                asyncio.to_thread(model.generate_content, prompt),
+                timeout=90.0
+            )
+            draft_text = response.text
+            print(f"[AI] Gemini API 호출 완료 (생성된 텍스트 길이: {len(draft_text)}자)")
+        except asyncio.TimeoutError:
+            print("[AI] Gemini API 호출 타임아웃 (90초 초과)")
+            raise HTTPException(
+                status_code=504,
+                detail="초안 생성 시간이 초과되었습니다. 이미지 생성 요청이 포함되어 있으면 제거하고 다시 시도해주세요."
+            )
         
         # 의료법 위반 단어 검사
         violations = await check_medical_violations_with_gemini(draft_text)
@@ -947,68 +970,122 @@ async def generate_image(request: ImageRequest) -> ImageResponse:
 
 이미지 생성 프롬프트:"""
         
-        response = model.generate_content(prompt)
-        result = response.text.strip()
+        # 이미지 생성 프롬프트 생성에 타임아웃 설정 (30초)
+        print(f"[이미지 생성] 프롬프트 생성 시작 (타임아웃: 30초)")
+        try:
+            response = await asyncio.wait_for(
+                asyncio.to_thread(model.generate_content, prompt),
+                timeout=30.0
+            )
+            result = response.text.strip()
+            print(f"[이미지 생성] 프롬프트 생성 완료")
+        except asyncio.TimeoutError:
+            print("[이미지 생성] 프롬프트 생성 타임아웃 (30초 초과)")
+            # 타임아웃 시 기본 프롬프트 사용
+            result = f"Professional medical illustration of {request.prompt}, clean and informative, suitable for healthcare blog"
+            print(f"[이미지 생성] 기본 프롬프트 사용: {result}")
         
         # 프롬프트 추출
         image_prompt = result
         if "프롬프트:" in result:
             image_prompt = result.split("프롬프트:")[-1].strip()
         
-        # 이미지 생성 - Gemini NanoBanana API 사용
-        # google-generativeai 라이브러리의 ImageGenerationModel 사용 (엔드포인트 찾을 필요 없음!)
+        # 이미지 생성 - 여러 방법 시도
         image_url = None
+        import base64
         
-        # 방법 1: google-generativeai 라이브러리 사용 (추천 - 간단하고 안정적)
+        # 방법 1: Google Generative AI REST API 사용 (가장 간단)
         try:
-            print(f"[이미지 생성] Gemini ImageGenerationModel로 이미지 생성 시도: {image_prompt[:50]}...")
+            print(f"[이미지 생성] Google Generative AI REST API로 이미지 생성 시도: {image_prompt[:50]}...")
             
-            # ImageGenerationModel 사용 (엔드포인트를 직접 찾을 필요 없음!)
-            # 사용 가능한 모델: imagen-3.0-generate-001, imagen-3.0-generate-002 등
-            imagen_model = genai.ImageGenerationModel("imagen-3.0-generate-001")
+            # Google Generative AI의 이미지 생성 API 엔드포인트
+            # 참고: 현재 Google API 키로는 이미지 생성이 제한될 수 있음
+            # Vertex AI나 별도 설정이 필요할 수 있습니다
             
-            # 이미지 생성
-            # 참고: generate_images는 동기 함수이므로 asyncio.to_thread로 비동기 실행
-            import asyncio
-            import base64
+            # REST API 호출 시도
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/imagen-3.0-generate-001:generateImages"
+            headers = {
+                "Content-Type": "application/json",
+                "x-goog-api-key": settings.google_api_key
+            }
+            payload = {
+                "prompt": image_prompt,
+                "number_of_images": 1,
+                "aspect_ratio": "16:9"
+            }
             
-            def generate_image_sync():
-                """동기 함수로 이미지 생성"""
-                try:
-                    result = imagen_model.generate_images(
-                        prompt=image_prompt,
-                        number_of_images=1,
-                        aspect_ratio="16:9"  # 또는 "1:1", "9:16"
-                    )
-                    return result
-                except Exception as e:
-                    print(f"[이미지 생성] ImageGenerationModel 오류: {str(e)}")
-                    return None
-            
-            # 비동기로 실행
-            result = await asyncio.to_thread(generate_image_sync)
-            
-            if result and len(result.images) > 0:
-                # 이미지가 PIL.Image 객체로 반환됨
-                image = result.images[0]
+            async with httpx.AsyncClient(timeout=httpx.Timeout(240.0)) as client:
+                response = await client.post(url, headers=headers, json=payload)
                 
-                # PIL Image를 base64로 변환
-                from io import BytesIO
-                buffer = BytesIO()
-                image.save(buffer, format="PNG")
-                image_bytes = buffer.getvalue()
-                image_base64 = base64.b64encode(image_bytes).decode('utf-8')
-                
-                # base64 데이터 URL 생성
-                image_url = f"data:image/png;base64,{image_base64}"
-                print(f"[이미지 생성] Gemini ImageGenerationModel 성공!")
-            else:
-                print(f"[이미지 생성] ImageGenerationModel에서 이미지를 생성하지 못했습니다.")
+                if response.status_code == 200:
+                    data = response.json()
+                    # 응답 구조에 따라 이미지 데이터 추출
+                    if "images" in data and len(data["images"]) > 0:
+                        # base64 인코딩된 이미지 데이터 추출
+                        image_data = data["images"][0].get("base64", "") or data["images"][0].get("bytes", "")
+                        if image_data:
+                            image_url = f"data:image/png;base64,{image_data}"
+                            print(f"[이미지 생성] REST API 성공!")
+                        else:
+                            # URL이 있는 경우
+                            image_url = data["images"][0].get("url", "")
+                            if image_url:
+                                print(f"[이미지 생성] REST API 성공 (URL 반환)!")
+                else:
+                    print(f"[이미지 생성] REST API 실패: HTTP {response.status_code} - {response.text[:200]}")
         
         except Exception as e:
-            print(f"[이미지 생성] ImageGenerationModel 실패: {str(e)}")
+            print(f"[이미지 생성] REST API 실패: {str(e)}")
             import traceback
             print(traceback.format_exc())
+        
+        # 방법 2: google-generativeai 라이브러리의 ImageGenerationModel 시도 (작동하지 않을 수 있음)
+        if not image_url:
+            try:
+                print(f"[이미지 생성] ImageGenerationModel로 이미지 생성 시도: {image_prompt[:50]}...")
+                
+                # ImageGenerationModel 사용 (작동하지 않을 수 있음)
+                imagen_model = genai.ImageGenerationModel("imagen-3.0-generate-001")
+                
+                def generate_image_sync():
+                    """동기 함수로 이미지 생성"""
+                    try:
+                        result = imagen_model.generate_images(
+                            prompt=image_prompt,
+                            number_of_images=1,
+                            aspect_ratio="16:9"
+                        )
+                        return result
+                    except Exception as e:
+                        print(f"[이미지 생성] ImageGenerationModel 오류: {str(e)}")
+                        return None
+                
+                print(f"[이미지 생성] 이미지 생성 시작 (타임아웃: 4분)")
+                try:
+                    result = await asyncio.wait_for(
+                        asyncio.to_thread(generate_image_sync),
+                        timeout=240.0  # 4분
+                    )
+                except asyncio.TimeoutError:
+                    print("[이미지 생성] 이미지 생성 타임아웃 (4분 초과)")
+                    result = None
+                
+                if result and len(result.images) > 0:
+                    image = result.images[0]
+                    from io import BytesIO
+                    buffer = BytesIO()
+                    image.save(buffer, format="PNG")
+                    image_bytes = buffer.getvalue()
+                    image_base64 = base64.b64encode(image_bytes).decode('utf-8')
+                    image_url = f"data:image/png;base64,{image_base64}"
+                    print(f"[이미지 생성] ImageGenerationModel 성공!")
+                else:
+                    print(f"[이미지 생성] ImageGenerationModel에서 이미지를 생성하지 못했습니다.")
+            
+            except Exception as e:
+                print(f"[이미지 생성] ImageGenerationModel 실패: {str(e)}")
+                import traceback
+                print(traceback.format_exc())
         
         # 방법 2: Vertex AI Imagen 사용 (위 방법이 실패한 경우)
         if not image_url:
