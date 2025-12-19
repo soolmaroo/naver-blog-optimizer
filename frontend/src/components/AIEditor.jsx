@@ -42,6 +42,58 @@ export default function AIEditor() {
   const [tableType, setTableType] = useState('statistics');
   const [insertingImage, setInsertingImage] = useState(false);
   const [insertingTable, setInsertingTable] = useState(false);
+  
+  // 이미지 관련 상태
+  const [uploadedImages, setUploadedImages] = useState({ draft: [], revised: [], final: [] }); // 각 에디터별 이미지 목록
+  
+  // 프리뷰 모드 상태 (텍스트/프리뷰 전환)
+  const [previewMode, setPreviewMode] = useState({ draft: true, revised: true, final: true }); // 기본값을 프리뷰 모드로 설정
+  // 편집 모드 상태 (포커스 중일 때만 텍스트 모드)
+  const [editingMode, setEditingMode] = useState({ draft: false, revised: false, final: false });
+  
+  // 마크다운을 HTML로 변환하는 함수
+  const markdownToHtml = (text) => {
+    if (!text) return '';
+    
+    let html = text;
+    
+    // HTML 특수문자 이스케이프 (XSS 방지)
+    const escapeHtml = (str) => {
+      const map = {
+        '&': '&amp;',
+        '<': '&lt;',
+        '>': '&gt;',
+        '"': '&quot;',
+        "'": '&#039;'
+      };
+      return str.replace(/[&<>"']/g, (m) => map[m]);
+    };
+    
+    // 이미지 마크다운 변환: ![alt](url) -> <img src="url" alt="alt" />
+    html = html.replace(/!\[([^\]]*)\]\(([^)]+)\)/g, (match, alt, url) => {
+      const escapedUrl = escapeHtml(url);
+      const escapedAlt = escapeHtml(alt || '이미지');
+      return `<div class="my-4 flex justify-center"><img src="${escapedUrl}" alt="${escapedAlt}" class="max-w-full h-auto rounded-lg border border-slate-300 shadow-sm cursor-pointer hover:opacity-90 transition-opacity" style="max-width: 100%; height: auto; max-height: 500px;" onclick="window.open('${escapedUrl}', '_blank')" onerror="this.onerror=null; this.src='https://placehold.co/400x300/cccccc/666666?text=이미지+로드+실패'" /></div>`;
+    });
+    
+    // 링크 마크다운 변환: [text](url) -> <a href="url">text</a>
+    html = html.replace(/\[([^\]]+)\]\(([^)]+)\)/g, (match, text, url) => {
+      const escapedUrl = escapeHtml(url);
+      const escapedText = escapeHtml(text);
+      return `<a href="${escapedUrl}" target="_blank" rel="noopener noreferrer" class="text-clinicGreen-600 hover:text-clinicGreen-700 underline">${escapedText}</a>`;
+    });
+    
+    // 강조 표시: **text** -> <strong>text</strong>
+    html = html.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+    html = html.replace(/\*([^*]+)\*/g, '<em>$1</em>');
+    
+    // 줄바꿈 처리 (연속된 줄바꿈은 단락 구분)
+    html = html.replace(/\n\n+/g, '</p><p class="my-2">');
+    html = html.replace(/\n/g, '<br />');
+    html = '<p class="my-2">' + html + '</p>';
+    
+    return html;
+  };
 
   const handleGenerate = async (style = writingStyle) => {
     if (!topic.trim()) return;
@@ -81,11 +133,39 @@ export default function AIEditor() {
       setDraft(data.draft);
       setViolations(data.medical_violations || []);
       setWordCount(data.word_count || 0);
+      
+      // 초안에서 이미지 마크다운 파싱하여 이미지 목록에 추가
+      const imageRegex = /!\[([^\]]*)\]\(([^)]+)\)/g;
+      const foundImages = [];
+      let match;
+      while ((match = imageRegex.exec(data.draft)) !== null) {
+        foundImages.push({
+          id: `img_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
+          url: match[2],
+          alt: match[1] || '이미지',
+          markdown: match[0]
+        });
+      }
+      
+      // 이미지가 포함되어 있으면 로그만 출력 (이제 항상 이미지가 표시됨)
+      if (foundImages.length > 0) {
+        console.log(`[프론트엔드] 이미지 ${foundImages.length}개가 포함되어 있습니다.`);
+      }
+      
       // 초안 생성 시 퇴고 관련 상태 초기화
       setRevisedDraft('');
       setRevisedViolations([]);
       setRevisionInstruction('');
       setFinalDraft('');
+      // 이미지 목록 초기화 후 파싱된 이미지 추가
+      setUploadedImages({ 
+        draft: foundImages, 
+        revised: [], 
+        final: [] 
+      });
+      // 편집 모드 해제, 프리뷰 모드 활성화 (이미지가 바로 보이도록)
+      setEditingMode({ draft: false, revised: false, final: false });
+      setPreviewMode({ draft: true, revised: true, final: true });
       // 내용 지시사항은 유지 (재사용 가능)
     } catch (error) {
       console.error('초안 생성 실패:', error);
@@ -295,6 +375,48 @@ export default function AIEditor() {
     });
   };
 
+  // 이미지 붙여넣기 처리
+  const handlePaste = async (e, target) => {
+    const items = e.clipboardData.items;
+    
+    for (let i = 0; i < items.length; i++) {
+      const item = items[i];
+      
+      // 이미지 파일인 경우
+      if (item.type.indexOf('image') !== -1) {
+        e.preventDefault();
+        const file = item.getAsFile();
+        if (file) {
+          await insertImage(file, target);
+          alert('이미지가 붙여넣어졌습니다!');
+        }
+        return;
+      }
+    }
+  };
+
+  // 드래그앤드롭 처리
+  const handleDragOver = (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    e.dataTransfer.dropEffect = 'copy';
+  };
+
+  const handleDrop = async (e, target) => {
+    e.preventDefault();
+    e.stopPropagation();
+    
+    const files = Array.from(e.dataTransfer.files);
+    const imageFiles = files.filter(file => file.type.startsWith('image/'));
+    
+    if (imageFiles.length > 0) {
+      for (const file of imageFiles) {
+        await insertImage(file, target);
+      }
+      alert(`${imageFiles.length}개의 이미지가 삽입되었습니다!`);
+    }
+  };
+
   // 커서 위치에 텍스트 삽입
   const insertTextAtCursor = (text, target) => {
     let currentText = '';
@@ -324,6 +446,87 @@ export default function AIEditor() {
     }
   };
 
+  // 이미지 파일을 base64로 변환
+  const fileToBase64 = (file) => {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(reader.result);
+      reader.onerror = reject;
+      reader.readAsDataURL(file);
+    });
+  };
+
+  // 이미지 삽입 (파일 또는 URL)
+  const insertImage = async (imageSource, target) => {
+    let imageUrl = '';
+    let imageAlt = '삽입된 이미지';
+
+    // 이미지 소스가 파일인지 URL인지 확인
+    if (imageSource instanceof File) {
+      // 파일인 경우 base64로 변환
+      imageUrl = await fileToBase64(imageSource);
+      imageAlt = imageSource.name;
+    } else if (typeof imageSource === 'string') {
+      // URL인 경우
+      imageUrl = imageSource;
+    } else {
+      console.error('잘못된 이미지 소스:', imageSource);
+      return;
+    }
+
+    // 마크다운 형식으로 삽입
+    const markdown = `![${imageAlt}](${imageUrl})`;
+    insertTextAtCursor(markdown, target);
+
+    // 이미지 목록에 추가 (미리보기용)
+    const imageId = `img_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+    const newImage = {
+      id: imageId,
+      url: imageUrl,
+      alt: imageAlt,
+      markdown: markdown
+    };
+    
+    setUploadedImages(prev => ({
+      ...prev,
+      [target]: [...prev[target], newImage]
+    }));
+  };
+
+  // 이미지 삭제
+  const removeImage = (imageId, target) => {
+    setUploadedImages(prev => ({
+      ...prev,
+      [target]: prev[target].filter(img => img.id !== imageId)
+    }));
+    
+    // 마크다운에서도 제거
+    let currentText = '';
+    let setter = null;
+    
+    if (target === 'draft') {
+      currentText = draft;
+      setter = setDraft;
+    } else if (target === 'revised') {
+      currentText = revisedDraft;
+      setter = setRevisedDraft;
+    } else if (target === 'final') {
+      currentText = finalDraft;
+      setter = setFinalDraft;
+    }
+    
+    if (setter) {
+      const image = uploadedImages[target].find(img => img.id === imageId);
+      if (image) {
+        const newText = currentText.replace(image.markdown, '');
+        setter(newText);
+        if (target === 'draft') {
+          setWordCount(newText.length);
+        }
+      }
+    }
+  };
+
   // 이미지 생성 및 삽입
   const handleInsertImage = async () => {
     if (!imagePrompt.trim()) {
@@ -348,34 +551,146 @@ export default function AIEditor() {
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), 300000); // 5분
       
-      const response = await fetch(`${API_BASE_URL}/ai/image`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          prompt: imagePrompt.trim(),
-          article_text: articleText,
-        }),
-        signal: controller.signal
-      });
+      console.log('[프론트엔드] 이미지 생성 요청 시작');
+      console.log('[프론트엔드] API URL:', `${API_BASE_URL}/ai/image`);
+      console.log('[프론트엔드] 프롬프트:', imagePrompt.trim());
+      console.log('[프론트엔드] 글 내용 길이:', articleText.length);
+      
+      let response;
+      try {
+        response = await fetch(`${API_BASE_URL}/ai/image`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            prompt: imagePrompt.trim(),
+            article_text: articleText,
+          }),
+          signal: controller.signal
+        });
+        console.log('[프론트엔드] 응답 수신:', response.status, response.statusText);
+      } catch (fetchError) {
+        console.error('[프론트엔드] 요청 실패:', fetchError);
+        console.error('[프론트엔드] 오류 타입:', fetchError.name);
+        console.error('[프론트엔드] 오류 메시지:', fetchError.message);
+        throw fetchError;
+      }
+      
+      console.log('[프론트엔드] 응답 상태:', response.status, response.statusText);
+      console.log('[프론트엔드] 응답 헤더:', Object.fromEntries(response.headers.entries()));
 
       clearTimeout(timeoutId);
 
       if (!response.ok) {
-        const error = await response.json();
-        throw new Error(error.detail || '이미지 생성 실패');
+        let errorMessage = '이미지 생성 실패';
+        try {
+          const errorText = await response.text();
+          console.error('[프론트엔드] 오류 응답 본문:', errorText);
+          try {
+            const error = JSON.parse(errorText);
+            errorMessage = error.detail || error.message || errorMessage;
+          } catch {
+            errorMessage = errorText || errorMessage;
+          }
+        } catch (e) {
+          console.error('[프론트엔드] 오류 응답 파싱 실패:', e);
+        }
+        throw new Error(errorMessage);
       }
 
-      const data = await response.json();
+      // 응답 본문 확인
+      const responseText = await response.text();
+      console.log('[프론트엔드] 응답 본문 (원본):', responseText);
       
-      // 커서 위치에 마크다운 삽입
-      insertTextAtCursor(data.markdown, contextMenuTarget);
+      let data;
+      try {
+        data = JSON.parse(responseText);
+      } catch (parseError) {
+        console.error('[프론트엔드] JSON 파싱 실패:', parseError);
+        console.error('[프론트엔드] 파싱 실패한 본문:', responseText);
+        throw new Error('서버 응답을 파싱할 수 없습니다. 응답 형식을 확인해주세요.');
+      }
       
-      setShowImageModal(false);
-      setImagePrompt('');
-      setContextMenu(null);
-      alert('이미지가 삽입되었습니다!');
+      console.log('[프론트엔드] 응답 데이터:', data);
+      console.log('[프론트엔드] image_url:', data.image_url);
+      console.log('[프론트엔드] preview_url:', data.preview_url);
+      console.log('[프론트엔드] markdown:', data.markdown);
+      
+      // 이미지 삽입 처리 (마크다운 우선 사용)
+      if (data.markdown) {
+        // 마크다운이 있으면 마크다운을 직접 사용 (가장 정확함)
+        console.log('[프론트엔드] 마크다운 형식으로 삽입:', data.markdown);
+        console.log('[프론트엔드] 삽입 대상:', contextMenuTarget);
+        console.log('[프론트엔드] 커서 위치:', contextMenuCursorPos);
+        
+        insertTextAtCursor(data.markdown, contextMenuTarget);
+        console.log('[프론트엔드] 텍스트 삽입 완료');
+        
+        // 이미지 URL 추출하여 이미지 목록에 추가
+        const imageUrl = data.image_url || data.preview_url;
+        console.log('[프론트엔드] 이미지 URL:', imageUrl);
+        
+        if (imageUrl) {
+          // 마크다운에서 alt 텍스트 추출
+          const markdownMatch = data.markdown.match(/!\[([^\]]*)\]\(([^)]+)\)/);
+          const imageAlt = markdownMatch ? markdownMatch[1] : '이미지';
+          console.log('[프론트엔드] 추출된 alt 텍스트:', imageAlt);
+          
+          const imageId = `img_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+          const newImage = {
+            id: imageId,
+            url: imageUrl,
+            alt: imageAlt,
+            markdown: data.markdown
+          };
+          console.log('[프론트엔드] 새 이미지 객체:', newImage);
+          
+          setUploadedImages(prev => {
+            const updated = {
+              ...prev,
+              [contextMenuTarget]: [...prev[contextMenuTarget], newImage]
+            };
+            console.log('[프론트엔드] 업데이트된 이미지 목록:', updated);
+            return updated;
+          });
+          console.log('[프론트엔드] 이미지 목록 업데이트 완료');
+        }
+        
+        // 플레이스홀더 이미지인지 확인
+        if (imageUrl && imageUrl.includes('placehold.co')) {
+          console.warn('[프론트엔드] ⚠️ 플레이스홀더 이미지가 반환되었습니다. 실제 이미지 생성이 실패한 것 같습니다.');
+          alert('이미지 생성이 실패하여 플레이스홀더 이미지가 삽입되었습니다. 백엔드 로그를 확인해주세요.');
+        } else {
+          alert('이미지가 삽입되었습니다!');
+        }
+        
+        console.log('[프론트엔드] 모달 닫기 및 상태 초기화');
+        setShowImageModal(false);
+        setImagePrompt('');
+        setContextMenu(null);
+        console.log('[프론트엔드] 이미지 삽입 프로세스 완료');
+      } else if (data.image_url || data.preview_url) {
+        // 마크다운이 없으면 URL만 사용
+        const imageUrl = data.image_url || data.preview_url;
+        console.log('[프론트엔드] URL만 사용하여 삽입:', imageUrl);
+        await insertImage(imageUrl, contextMenuTarget);
+        
+        // 플레이스홀더 이미지인지 확인
+        if (imageUrl.includes('placehold.co')) {
+          console.warn('[프론트엔드] ⚠️ 플레이스홀더 이미지가 반환되었습니다. 실제 이미지 생성이 실패한 것 같습니다.');
+          alert('이미지 생성이 실패하여 플레이스홀더 이미지가 삽입되었습니다. 백엔드 로그를 확인해주세요.');
+        } else {
+          alert('이미지가 삽입되었습니다!');
+        }
+        
+        setShowImageModal(false);
+        setImagePrompt('');
+        setContextMenu(null);
+      } else {
+        console.error('[프론트엔드] 응답에 이미지 데이터가 없습니다:', data);
+        throw new Error('이미지 URL을 받지 못했습니다.');
+      }
     } catch (error) {
       console.error('이미지 생성 실패:', error);
       if (error.name === 'AbortError') {
@@ -862,8 +1177,8 @@ export default function AIEditor() {
           <div className="rounded-lg border-2 border-slate-300 bg-white p-4">
             <div className="flex items-center justify-between mb-3">
               <h4 className="font-semibold text-slate-900">📝 생성된 초안</h4>
-              <div className="flex gap-2 text-sm text-slate-600">
-                <span>글자 수: {wordCount}</span>
+              <div className="flex gap-2 items-center text-sm">
+                <span className="text-slate-600">글자 수: {wordCount}</span>
                 <button
                   onClick={handleCheckViolations}
                   className="text-clinicGreen-600 hover:text-clinicGreen-700 font-medium"
@@ -872,16 +1187,108 @@ export default function AIEditor() {
                 </button>
               </div>
             </div>
-            <textarea
-              value={draft}
-              onChange={(e) => {
-                setDraft(e.target.value);
-                setWordCount(e.target.value.length);
-              }}
-              onContextMenu={(e) => handleContextMenu(e, 'draft')}
-              rows={12}
-              className="w-full rounded-lg border border-slate-300 px-4 py-3 focus:border-clinicGreen-500 focus:outline-none focus:ring-2 focus:ring-clinicGreen-200"
-            />
+            <div className="space-y-2">
+              {/* 편집 모드와 프리뷰 모드 분리 */}
+              {editingMode.draft ? (
+                // 편집 모드: 텍스트만 표시 (마크다운 코드)
+                <textarea
+                  value={draft}
+                  onChange={(e) => {
+                    setDraft(e.target.value);
+                    setWordCount(e.target.value.length);
+                    
+                    // 텍스트 변경 시 이미지 마크다운 파싱하여 이미지 목록 업데이트
+                    const imageRegex = /!\[([^\]]*)\]\(([^)]+)\)/g;
+                    const foundImages = [];
+                    const seenMarkdowns = new Set();
+                    let match;
+                    while ((match = imageRegex.exec(e.target.value)) !== null) {
+                      if (!seenMarkdowns.has(match[0])) {
+                        seenMarkdowns.add(match[0]);
+                        const existingImage = uploadedImages.draft.find(img => img.markdown === match[0]);
+                        if (existingImage) {
+                          foundImages.push(existingImage);
+                        } else {
+                          foundImages.push({
+                            id: `img_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
+                            url: match[2],
+                            alt: match[1] || '이미지',
+                            markdown: match[0]
+                          });
+                        }
+                      }
+                    }
+                    setUploadedImages(prev => ({
+                      ...prev,
+                      draft: foundImages
+                    }));
+                  }}
+                  onBlur={() => {
+                    // 포커스를 잃으면 자동으로 프리뷰 모드로 전환
+                    setEditingMode(prev => ({ ...prev, draft: false }));
+                    setPreviewMode(prev => ({ ...prev, draft: true }));
+                  }}
+                  onContextMenu={(e) => handleContextMenu(e, 'draft')}
+                  onPaste={(e) => handlePaste(e, 'draft')}
+                  onDragOver={handleDragOver}
+                  onDrop={(e) => handleDrop(e, 'draft')}
+                  rows={12}
+                  className="w-full rounded-lg border border-slate-300 px-4 py-3 focus:border-clinicGreen-500 focus:outline-none focus:ring-2 focus:ring-clinicGreen-200"
+                  placeholder="여기에 글을 작성하세요. 이미지는 복사 붙여넣기(Ctrl+V) 또는 드래그앤드롭으로 추가할 수 있습니다."
+                  autoFocus
+                />
+              ) : (
+                // 프리뷰 모드: 마크다운을 HTML로 렌더링 (이미지 포함)
+                <div 
+                  className="w-full rounded-lg border border-slate-300 px-4 py-3 bg-white min-h-[300px] prose prose-sm max-w-none cursor-text"
+                  dangerouslySetInnerHTML={{ __html: markdownToHtml(draft) }}
+                  onClick={() => {
+                    // 클릭하면 편집 모드로 전환
+                    setEditingMode(prev => ({ ...prev, draft: true }));
+                    setPreviewMode(prev => ({ ...prev, draft: false }));
+                  }}
+                  style={{ 
+                    lineHeight: '1.6',
+                    fontSize: '14px',
+                    color: '#334155',
+                    minHeight: '300px'
+                  }}
+                />
+              )}
+              
+              {/* 이미지 미리보기 */}
+              {uploadedImages.draft.length > 0 && (
+                <div className="rounded-lg border border-slate-200 bg-slate-50 p-3">
+                  <p className="mb-2 text-xs font-medium text-slate-600">삽입된 이미지 ({uploadedImages.draft.length}개)</p>
+                  <div className="grid grid-cols-3 gap-2">
+                    {uploadedImages.draft.map((img) => (
+                      <div key={img.id} className="relative group">
+                        <img
+                          src={img.url}
+                          alt={img.alt}
+                          className="w-full h-24 object-cover rounded border border-slate-300 cursor-pointer hover:opacity-80 transition-opacity"
+                          onClick={() => {
+                            // 이미지 클릭 시 새 창에서 크게 보기
+                            window.open(img.url, '_blank');
+                          }}
+                          onError={(e) => {
+                            // 이미지 로드 실패 시 플레이스홀더 표시
+                            e.target.src = 'https://placehold.co/400x300/cccccc/666666?text=이미지+로드+실패';
+                          }}
+                        />
+                        <button
+                          onClick={() => removeImage(img.id, 'draft')}
+                          className="absolute top-1 right-1 bg-red-500 text-white rounded-full w-5 h-5 flex items-center justify-center text-xs opacity-0 group-hover:opacity-100 transition-opacity"
+                          title="이미지 삭제"
+                        >
+                          ×
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
             
             {violations.length > 0 && (
               <div className="mt-3 rounded-lg border border-red-200 bg-red-50 p-3">
@@ -945,17 +1352,99 @@ export default function AIEditor() {
                   <span className="text-xl">✨</span>
                   <h4 className="font-semibold text-clinicGreen-700">퇴고된 버전</h4>
                 </div>
-                <div className="text-sm text-slate-600">
-                  <span>글자 수: {revisedDraft.length}</span>
+                <div className="flex gap-2 items-center text-sm">
+                  <span className="text-slate-600">글자 수: {revisedDraft.length}</span>
                 </div>
               </div>
-              <textarea
-                value={revisedDraft}
-                onChange={(e) => setRevisedDraft(e.target.value)}
-                onContextMenu={(e) => handleContextMenu(e, 'revised')}
-                rows={12}
-                className="mb-3 w-full rounded-lg border border-clinicGreen-300 bg-white px-4 py-3 focus:border-clinicGreen-500 focus:outline-none focus:ring-2 focus:ring-clinicGreen-200"
-              />
+              <div className="space-y-2">
+                {editingMode.revised ? (
+                  // 편집 모드: 텍스트만 표시 (마크다운 코드)
+                  <textarea
+                    value={revisedDraft}
+                    onChange={(e) => {
+                      setRevisedDraft(e.target.value);
+                      // 이미지 파싱
+                      const imageRegex = /!\[([^\]]*)\]\(([^)]+)\)/g;
+                      const foundImages = [];
+                      const seenMarkdowns = new Set();
+                      let match;
+                      while ((match = imageRegex.exec(e.target.value)) !== null) {
+                        if (!seenMarkdowns.has(match[0])) {
+                          seenMarkdowns.add(match[0]);
+                          const existingImage = uploadedImages.revised.find(img => img.markdown === match[0]);
+                          if (existingImage) {
+                            foundImages.push(existingImage);
+                          } else {
+                            foundImages.push({
+                              id: `img_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
+                              url: match[2],
+                              alt: match[1] || '이미지',
+                              markdown: match[0]
+                            });
+                          }
+                        }
+                      }
+                      setUploadedImages(prev => ({
+                        ...prev,
+                        revised: foundImages
+                      }));
+                    }}
+                    onBlur={() => {
+                      setEditingMode(prev => ({ ...prev, revised: false }));
+                      setPreviewMode(prev => ({ ...prev, revised: true }));
+                    }}
+                    onContextMenu={(e) => handleContextMenu(e, 'revised')}
+                    onPaste={(e) => handlePaste(e, 'revised')}
+                    onDragOver={handleDragOver}
+                    onDrop={(e) => handleDrop(e, 'revised')}
+                    rows={12}
+                    className="mb-3 w-full rounded-lg border border-clinicGreen-300 bg-white px-4 py-3 focus:border-clinicGreen-500 focus:outline-none focus:ring-2 focus:ring-clinicGreen-200"
+                    placeholder="여기에 글을 작성하세요. 이미지는 복사 붙여넣기(Ctrl+V) 또는 드래그앤드롭으로 추가할 수 있습니다."
+                    autoFocus
+                  />
+                ) : (
+                  // 프리뷰 모드: 마크다운을 HTML로 렌더링 (이미지 포함)
+                  <div 
+                    className="w-full rounded-lg border border-clinicGreen-300 bg-white px-4 py-3 min-h-[300px] prose prose-sm max-w-none cursor-text"
+                    dangerouslySetInnerHTML={{ __html: markdownToHtml(revisedDraft) }}
+                    onClick={() => {
+                      setEditingMode(prev => ({ ...prev, revised: true }));
+                      setPreviewMode(prev => ({ ...prev, revised: false }));
+                    }}
+                    style={{ 
+                      lineHeight: '1.6',
+                      fontSize: '14px',
+                      color: '#334155',
+                      minHeight: '300px'
+                    }}
+                  />
+                )}
+                
+                {/* 이미지 미리보기 */}
+                {uploadedImages.revised.length > 0 && (
+                  <div className="rounded-lg border border-clinicGreen-200 bg-clinicGreen-50 p-3">
+                    <p className="mb-2 text-xs font-medium text-clinicGreen-700">삽입된 이미지 ({uploadedImages.revised.length}개)</p>
+                    <div className="grid grid-cols-3 gap-2">
+                      {uploadedImages.revised.map((img) => (
+                        <div key={img.id} className="relative group">
+                          <img
+                            src={img.url}
+                            alt={img.alt}
+                            className="w-full h-24 object-cover rounded border border-clinicGreen-300"
+                          />
+                          <button
+                            onClick={() => removeImage(img.id, 'revised')}
+                            className="absolute top-1 right-1 bg-red-500 text-white rounded-full w-5 h-5 flex items-center justify-center text-xs opacity-0 group-hover:opacity-100 transition-opacity"
+                            title="이미지 삭제"
+                          >
+                            ×
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
               
               {/* 퇴고된 버전의 의료법 위반 검사 결과 */}
               {revisedViolations.length > 0 && (
@@ -1027,26 +1516,108 @@ export default function AIEditor() {
                   <span className="text-xl">🎯</span>
                   <h4 className="font-semibold text-purple-900">최종 결정된 버전</h4>
                 </div>
-                <div className="flex gap-2 text-sm text-purple-700">
-                  <span>글자 수: {finalDraft.length}</span>
+                <div className="flex gap-2 items-center text-sm">
+                  <span className="text-purple-700">글자 수: {finalDraft.length}</span>
                   <button
                     onClick={() => {
                       navigator.clipboard.writeText(finalDraft);
                       alert('최종 버전이 클립보드에 복사되었습니다!');
                     }}
-                    className="font-medium hover:text-purple-900"
+                    className="font-medium text-purple-700 hover:text-purple-900"
                   >
                     복사하기
                   </button>
                 </div>
               </div>
-              <textarea
-                value={finalDraft}
-                onChange={(e) => setFinalDraft(e.target.value)}
-                onContextMenu={(e) => handleContextMenu(e, 'final')}
-                rows={12}
-                className="w-full rounded-lg border border-purple-300 bg-white px-4 py-3 focus:border-purple-500 focus:outline-none focus:ring-2 focus:ring-purple-200"
-              />
+              <div className="space-y-2">
+                {editingMode.final ? (
+                  // 편집 모드: 텍스트만 표시 (마크다운 코드)
+                  <textarea
+                    value={finalDraft}
+                    onChange={(e) => {
+                      setFinalDraft(e.target.value);
+                      // 이미지 파싱
+                      const imageRegex = /!\[([^\]]*)\]\(([^)]+)\)/g;
+                      const foundImages = [];
+                      const seenMarkdowns = new Set();
+                      let match;
+                      while ((match = imageRegex.exec(e.target.value)) !== null) {
+                        if (!seenMarkdowns.has(match[0])) {
+                          seenMarkdowns.add(match[0]);
+                          const existingImage = uploadedImages.final.find(img => img.markdown === match[0]);
+                          if (existingImage) {
+                            foundImages.push(existingImage);
+                          } else {
+                            foundImages.push({
+                              id: `img_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
+                              url: match[2],
+                              alt: match[1] || '이미지',
+                              markdown: match[0]
+                            });
+                          }
+                        }
+                      }
+                      setUploadedImages(prev => ({
+                        ...prev,
+                        final: foundImages
+                      }));
+                    }}
+                    onBlur={() => {
+                      setEditingMode(prev => ({ ...prev, final: false }));
+                      setPreviewMode(prev => ({ ...prev, final: true }));
+                    }}
+                    onContextMenu={(e) => handleContextMenu(e, 'final')}
+                    onPaste={(e) => handlePaste(e, 'final')}
+                    onDragOver={handleDragOver}
+                    onDrop={(e) => handleDrop(e, 'final')}
+                    rows={12}
+                    className="w-full rounded-lg border border-purple-300 bg-white px-4 py-3 focus:border-purple-500 focus:outline-none focus:ring-2 focus:ring-purple-200"
+                    placeholder="여기에 글을 작성하세요. 이미지는 복사 붙여넣기(Ctrl+V) 또는 드래그앤드롭으로 추가할 수 있습니다."
+                    autoFocus
+                  />
+                ) : (
+                  // 프리뷰 모드: 마크다운을 HTML로 렌더링 (이미지 포함)
+                  <div 
+                    className="w-full rounded-lg border border-purple-300 bg-white px-4 py-3 min-h-[300px] prose prose-sm max-w-none cursor-text"
+                    dangerouslySetInnerHTML={{ __html: markdownToHtml(finalDraft) }}
+                    onClick={() => {
+                      setEditingMode(prev => ({ ...prev, final: true }));
+                      setPreviewMode(prev => ({ ...prev, final: false }));
+                    }}
+                    style={{ 
+                      lineHeight: '1.6',
+                      fontSize: '14px',
+                      color: '#334155',
+                      minHeight: '300px'
+                    }}
+                  />
+                )}
+                
+                {/* 이미지 미리보기 */}
+                {uploadedImages.final.length > 0 && (
+                  <div className="rounded-lg border border-purple-200 bg-purple-50 p-3">
+                    <p className="mb-2 text-xs font-medium text-purple-700">삽입된 이미지 ({uploadedImages.final.length}개)</p>
+                    <div className="grid grid-cols-3 gap-2">
+                      {uploadedImages.final.map((img) => (
+                        <div key={img.id} className="relative group">
+                          <img
+                            src={img.url}
+                            alt={img.alt}
+                            className="w-full h-24 object-cover rounded border border-purple-300"
+                          />
+                          <button
+                            onClick={() => removeImage(img.id, 'final')}
+                            className="absolute top-1 right-1 bg-red-500 text-white rounded-full w-5 h-5 flex items-center justify-center text-xs opacity-0 group-hover:opacity-100 transition-opacity"
+                            title="이미지 삭제"
+                          >
+                            ×
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
             </div>
           )}
         </div>
@@ -1089,6 +1660,37 @@ export default function AIEditor() {
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black bg-opacity-50">
           <div className="w-full max-w-md rounded-lg bg-white p-6 shadow-xl">
             <h3 className="mb-4 text-lg font-semibold text-slate-900">그림 삽입</h3>
+            
+            {/* 탭: AI 생성 / 직접 업로드 */}
+            <div className="mb-4 flex gap-2 border-b border-slate-200">
+              <button
+                onClick={() => {}}
+                className="flex-1 border-b-2 border-clinicGreen-600 px-4 py-2 text-sm font-medium text-clinicGreen-600"
+              >
+                🤖 AI로 생성
+              </button>
+              <button
+                onClick={() => {
+                  const input = document.createElement('input');
+                  input.type = 'file';
+                  input.accept = 'image/*';
+                  input.onchange = async (e) => {
+                    const file = e.target.files[0];
+                    if (file) {
+                      await insertImage(file, contextMenuTarget);
+                      setShowImageModal(false);
+                      setContextMenu(null);
+                      alert('이미지가 삽입되었습니다!');
+                    }
+                  };
+                  input.click();
+                }}
+                className="flex-1 px-4 py-2 text-sm font-medium text-slate-600 hover:text-slate-900"
+              >
+                📁 파일 선택
+              </button>
+            </div>
+            
             <p className="mb-3 text-sm text-slate-600">
               삽입할 그림에 대한 설명을 입력해주세요. AI가 적절한 그림을 생성합니다.
             </p>
@@ -1117,6 +1719,9 @@ export default function AIEditor() {
                 {insertingImage ? '생성 중...' : '생성 및 삽입'}
               </button>
             </div>
+            <p className="mt-3 text-xs text-slate-500">
+              💡 팁: 이미지 파일을 복사(Ctrl+C)한 후 에디터에 붙여넣기(Ctrl+V)하거나, 드래그앤드롭으로도 추가할 수 있습니다.
+            </p>
           </div>
         </div>
       )}
@@ -1176,4 +1781,3 @@ export default function AIEditor() {
     </div>
   );
 }
-

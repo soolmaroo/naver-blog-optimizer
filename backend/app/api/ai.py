@@ -10,8 +10,61 @@ import httpx
 from bs4 import BeautifulSoup
 import re
 import asyncio
+import sys
+import os
+import io
+
+# Windows에서 UTF-8 인코딩 설정
+if sys.platform == 'win32':
+    # stdout과 stderr의 인코딩을 UTF-8로 설정
+    if hasattr(sys.stdout, 'reconfigure'):
+        sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+    if hasattr(sys.stderr, 'reconfigure'):
+        sys.stderr.reconfigure(encoding='utf-8', errors='replace')
+    # io 모듈의 기본 인코딩도 설정
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace', line_buffering=True)
+    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace', line_buffering=True)
 
 router = APIRouter()
+
+# 로그 파일 경로
+# backend/app/api/ai.py -> backend/app/api -> backend/app -> backend -> 프로젝트 루트
+LOG_FILE_PATH = Path(__file__).resolve().parent.parent.parent.parent / "backend_logs.txt"
+
+def log_to_file(message: str):
+    """파일과 콘솔 모두에 로그 출력"""
+    # 콘솔에 먼저 출력 (인코딩 문제 없이)
+    print(message, flush=True)
+    sys.stdout.flush()
+    sys.stderr.flush()
+    
+    # 파일에 쓰기 (UTF-8)
+    try:
+        # 로그 파일 경로 확인
+        log_dir = LOG_FILE_PATH.parent
+        if not log_dir.exists():
+            log_dir.mkdir(parents=True, exist_ok=True)
+            print(f"[로그] 디렉토리 생성: {log_dir}", flush=True)
+        
+        # 메시지를 UTF-8로 명시적으로 인코딩
+        message_bytes = message.encode('utf-8', errors='replace')
+        message_safe = message_bytes.decode('utf-8', errors='replace')
+        
+        # 파일 열기 (없으면 생성)
+        with open(LOG_FILE_PATH, 'a', encoding='utf-8', errors='replace') as f:
+            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            f.write(f"[{timestamp}] {message_safe}\n")
+            f.flush()
+            os.fsync(f.fileno())  # 디스크에 즉시 쓰기
+    except PermissionError as e:
+        print(f"[로그 파일 쓰기 실패 - 권한 오류] {str(e)}", flush=True)
+        print(f"[로그 파일 경로] {LOG_FILE_PATH}", flush=True)
+    except Exception as e:
+        # 파일 로깅 실패해도 콘솔 출력은 계속
+        print(f"[로그 파일 쓰기 실패] {type(e).__name__}: {str(e)}", flush=True)
+        print(f"[로그 파일 경로] {LOG_FILE_PATH}", flush=True)
+        import traceback
+        print(f"[로그 파일 쓰기 실패 상세] {traceback.format_exc()}", flush=True)
 
 # 학습 데이터 저장 경로
 LEARNING_DATA_PATH = Path(__file__).resolve().parent.parent.parent.parent / "learning_data.json"
@@ -569,23 +622,44 @@ async def check_medical_violations_with_gemini(text: str) -> list[str]:
         
         # 제미나이 모델 선택
         try:
-            model_names = [
-                'gemini-1.5-flash-latest',
-                'gemini-1.5-pro-latest',
-                'gemini-1.5-flash',
-                'gemini-1.5-pro',
-            ]
-            model = None
-            for model_name in model_names:
-                try:
+            # 먼저 사용 가능한 모델 목록 확인
+            try:
+                available_models = genai.list_models()
+                model_names_found = []
+                for model_info in available_models:
+                    if 'generateContent' in model_info.supported_generation_methods:
+                        model_name = model_info.name.replace('models/', '')
+                        model_names_found.append(model_name)
+                
+                # 사용 가능한 모델이 있으면 첫 번째 모델 사용
+                if model_names_found:
+                    model_name = model_names_found[0]
+                    print(f"[의료법 검사] 사용 가능한 모델 선택: {model_name}")
                     model = genai.GenerativeModel(model_name)
-                    break
-                except Exception:
-                    continue
-            
-            if model is None:
-                print("[의료법 검사] 모델을 찾을 수 없어 기본 검사만 수행합니다.")
-                return check_medical_violations(text)
+                else:
+                    raise Exception("사용 가능한 모델이 없습니다.")
+            except Exception as list_error:
+                print(f"[의료법 검사] 모델 목록 조회 실패, 기본 모델 시도: {str(list_error)}")
+                # 기본 모델 시도 (안정적인 이름만 사용)
+                model_names = [
+                    'gemini-1.5-flash',
+                    'gemini-1.5-pro',
+                    'gemini-pro',
+                ]
+                model = None
+                for model_name in model_names:
+                    try:
+                        print(f"[의료법 검사] 모델 시도: {model_name}")
+                        model = genai.GenerativeModel(model_name)
+                        print(f"[의료법 검사] 모델 성공: {model_name}")
+                        break
+                    except Exception as e:
+                        print(f"[의료법 검사] 모델 실패 ({model_name}): {str(e)}")
+                        continue
+                
+                if model is None:
+                    print("[의료법 검사] 모델을 찾을 수 없어 기본 검사만 수행합니다.")
+                    return check_medical_violations(text)
         except Exception as e:
             print(f"[의료법 검사] 모델 초기화 실패: {str(e)}")
             return check_medical_violations(text)
@@ -686,12 +760,11 @@ async def generate_draft(request: DraftRequest) -> DraftResponse:
                 print(f"[AI] 선택된 모델: {model_name}")
                 model = genai.GenerativeModel(model_name)
             else:
-                # 기본 모델 시도
+                # 기본 모델 시도 (안정적인 이름만 사용)
                 model_names = [
-                    'gemini-1.5-flash-latest',
-                    'gemini-1.5-pro-latest',
                     'gemini-1.5-flash',
                     'gemini-1.5-pro',
+                    'gemini-pro',
                 ]
                 model = None
                 for model_name in model_names:
@@ -712,7 +785,16 @@ async def generate_draft(request: DraftRequest) -> DraftResponse:
         except Exception as e:
             print(f"[AI] 모델 목록 조회 실패, 기본 모델 시도: {str(e)}")
             # 모델 목록 조회 실패 시 기본 모델 시도
-            model = genai.GenerativeModel('gemini-1.5-flash')
+            try:
+                model = genai.GenerativeModel('gemini-1.5-flash')
+            except Exception:
+                try:
+                    model = genai.GenerativeModel('gemini-pro')
+                except Exception as final_error:
+                    raise HTTPException(
+                        status_code=500,
+                        detail=f"모델 초기화 실패: {str(final_error)}"
+                    )
         
         # 프롬프트 구성 (스타일별)
         keywords_text = ", ".join(request.keywords) if request.keywords else ""
@@ -741,7 +823,7 @@ async def generate_draft(request: DraftRequest) -> DraftResponse:
                 learning_context += f"\n\n=== [학습된 스타일 규칙 - 반드시 준수해야 함] ===\n"
                 for i, rule in enumerate(style_rules, 1):
                     learning_context += f"{i}. {rule}\n"
-                learning_context += "\n⚠️ 매우 중요: 위의 스타일 규칙을 반드시 준수하여 작성하세요. 이 규칙들은 사용자가 퇴고를 통해 영구적으로 설정한 것이므로 절대 위반하지 마세요.\n"
+                learning_context += "\n[중요] 매우 중요: 위의 스타일 규칙을 반드시 준수하여 작성하세요. 이 규칙들은 사용자가 퇴고를 통해 영구적으로 설정한 것이므로 절대 위반하지 마세요.\n"
             
             # 퇴고 패턴에서 학습된 선호사항 반영
             revision_patterns = learning_data.get('revision_patterns', [])
@@ -805,7 +887,7 @@ async def generate_draft(request: DraftRequest) -> DraftResponse:
         if request.tone == 'personal' and has_learning_data:
             style_instruction += """
 
-⚠️ 매우 중요: 위의 "학습된 블로그 어투 예시"를 반드시 참고하여 작성하세요.
+[중요] 매우 중요: 위의 "학습된 블로그 어투 예시"를 반드시 참고하여 작성하세요.
 - 학습된 예시들의 문장 구조, 어투, 표현 방식을 정확히 따라야 합니다
 - 예시에서 사용하는 존댓말 표현, 문장 끝맺음 방식을 그대로 사용하세요
 - 예시의 톤과 느낌을 최대한 비슷하게 재현해야 합니다
@@ -820,6 +902,132 @@ async def generate_draft(request: DraftRequest) -> DraftResponse:
         if learning_context:
             prompt_parts.append(learning_context)
         
+        # 프롬프트에서 이미지 생성 요청 감지 및 추출 (프롬프트 생성 전에 수행)
+        import re
+        image_keywords = [
+            '일러스트', '그림', '이미지', '사진', '그래프', '차트', 
+            '그림 생성', '이미지 생성', '사진 생성', '일러스트 생성',
+            '그림 넣어', '이미지 넣어', '사진 넣어', '일러스트 넣어',
+            '그림 추가', '이미지 추가', '사진 추가', '일러스트 추가',
+            '사진이나', '일러스트도', '그림도', '이미지도',
+            '생성해서 넣어', '적당히 생성', '생성해서'
+        ]
+        writing_instruction_lower = (request.writing_instruction or '').lower()
+        has_image_request = any(keyword in writing_instruction_lower for keyword in image_keywords)
+        
+        # 이미지 생성 요청이 있으면 이미지 생성
+        generated_image_markdown = ""
+        image_description = ""
+        if has_image_request:
+            print("[AI] 글쓰기 지시사항에 이미지 생성 요청이 감지되었습니다. 이미지를 생성합니다.")
+            print(f"[AI] 글쓰기 지시사항: {request.writing_instruction}")
+            try:
+                # 글쓰기 지시사항에서 이미지 관련 부분 추출
+                # 예: "사진이나 일러스트도 하나 넣어줘" -> "사진이나 일러스트"
+                # 예: "손목 통증이 있는 한의사의 일러스트를 하나 넣어줘" -> "손목 통증이 있는 한의사의 일러스트"
+                image_patterns = [
+                    # "사진이나 일러스트도" 같은 패턴
+                    r'([^\.!?]*(?:사진|일러스트|그림|이미지)(?:이나|도|또는|또는|과|와)[^\.!?]*(?:일러스트|그림|이미지|사진)[^\.!?]*)',
+                    # "일러스트를 하나 넣어줘" 같은 패턴
+                    r'([^\.!?]*(?:일러스트|그림|이미지|사진)[^\.!?]*(?:넣어|생성|추가|삽입)[^\.!?]*)',
+                    # "손목 통증 일러스트" 같은 패턴 (주제 관련)
+                    r'([^\.!?]*(?:일러스트|그림|이미지|사진)[^\.!?]*)',
+                ]
+                
+                image_description = ""
+                for pattern in image_patterns:
+                    matches = re.findall(pattern, request.writing_instruction, re.IGNORECASE)
+                    if matches:
+                        # 가장 긴 매치를 선택 (더 구체적)
+                        image_description = max(matches, key=len).strip()
+                        # "넣어줘", "생성해줘", "하나", "도", "이나" 같은 동사/수량사/조사 제거
+                        image_description = re.sub(r'\s*(?:넣어|생성|추가|해줘|해주세요|하세요|하나|적당히|못찾으면|도|이나|또는|과|와).*$', '', image_description, flags=re.IGNORECASE)
+                        # 앞뒤의 조사 제거
+                        image_description = re.sub(r'^(?:도|이나|또는|과|와)\s*', '', image_description, flags=re.IGNORECASE)
+                        image_description = image_description.strip()
+                        
+                        # "사진이나 일러스트" 같은 경우 "사진 또는 일러스트"로 정리
+                        image_description = re.sub(r'사진\s*(?:이나|또는|과|와)\s*일러스트', '일러스트', image_description, flags=re.IGNORECASE)
+                        image_description = re.sub(r'일러스트\s*(?:이나|또는|과|와)\s*사진', '일러스트', image_description, flags=re.IGNORECASE)
+                        
+                        if image_description and len(image_description) > 2:
+                            break
+                
+                # 이미지 설명이 추출되지 않았거나 너무 짧거나 일반적인 경우 주제와 내용 지시사항을 참고
+                if not image_description or len(image_description) < 5 or image_description in ['일러스트', '그림', '이미지', '사진']:
+                    # 주제와 내용 지시사항을 조합하여 이미지 설명 생성
+                    topic_context = request.topic or ""
+                    content_context = request.content_instruction or ""
+                    
+                    # 내용 지시사항에서 핵심 키워드 추출 (손목, 통증, 추나, 치료 등)
+                    content_keywords = []
+                    if content_context:
+                        content_keywords = re.findall(r'\b(?:손목|통증|추나|치료|한의사|부원장|어깨|목|허리|무릎|발목)\w*\b', content_context, re.IGNORECASE)
+                    
+                    # 주제에서도 키워드 추출
+                    topic_keywords = []
+                    if topic_context:
+                        topic_keywords = re.findall(r'\b(?:손목|통증|추나|치료|한의사|부원장|어깨|목|허리|무릎|발목)\w*\b', topic_context, re.IGNORECASE)
+                    
+                    # 키워드 조합
+                    all_keywords = list(set(topic_keywords + content_keywords))
+                    
+                    if all_keywords:
+                        # 가장 관련성 높은 키워드 선택 (손목, 통증 우선)
+                        priority_keywords = ['손목', '통증', '추나', '치료']
+                        selected_keywords = []
+                        for pk in priority_keywords:
+                            if pk in all_keywords:
+                                selected_keywords.append(pk)
+                        if not selected_keywords:
+                            selected_keywords = all_keywords[:2]
+                        image_description = f"{' '.join(selected_keywords)}에 대한 일러스트"
+                    elif topic_context:
+                        image_description = f"{topic_context}에 대한 일러스트"
+                    elif content_context:
+                        # 내용에서 첫 30자 사용
+                        content_summary = content_context[:30].strip()
+                        image_description = f"{content_summary}에 대한 일러스트"
+                    else:
+                        image_description = "블로그 글에 적합한 일러스트"
+                    
+                    print(f"[AI] 이미지 설명이 추출되지 않아 주제/내용을 참고하여 생성: {image_description}")
+                else:
+                    # 추출된 이미지 설명이 일반적인 경우에도 주제/내용을 추가
+                    if image_description in ['일러스트', '그림', '이미지', '사진'] or len(image_description) < 10:
+                        topic_context = request.topic or ""
+                        if topic_context:
+                            image_description = f"{topic_context}에 대한 {image_description}"
+                            print(f"[AI] 주제를 참고하여 이미지 설명 보완: {image_description}")
+                
+                # 이미지 생성 프롬프트 생성 (더 구체적으로)
+                # 주제와 내용 지시사항을 참고하여 더 구체적인 프롬프트 생성
+                topic_context = f"{request.topic}에 대한 " if request.topic else ""
+                content_hint = ""
+                if request.content_instruction:
+                    # 내용 지시사항에서 핵심 키워드 추출
+                    content_keywords = re.findall(r'\b(?:손목|통증|추나|치료|한의사|부원장)\w*\b', request.content_instruction, re.IGNORECASE)
+                    if content_keywords:
+                        content_hint = f", {', '.join(content_keywords[:3])} 관련"
+                
+                image_prompt_text = f"{topic_context}블로그 글에 삽입할 {image_description}{content_hint}"
+                print(f"[AI] 추출된 이미지 설명: {image_description}")
+                print(f"[AI] 이미지 생성 프롬프트: {image_prompt_text}")
+                
+                # 이미지 생성 (내부 함수 사용)
+                image_url, generated_image_markdown = await _generate_image_internal(
+                    prompt=image_prompt_text,
+                    article_text="",
+                    context=request.writing_instruction
+                )
+                print(f"[AI] 이미지 생성 완료: {image_url}")
+                print(f"[AI] 생성된 마크다운: {generated_image_markdown}")
+            except Exception as e:
+                print(f"[AI] 이미지 생성 실패 (초안 생성은 계속 진행): {str(e)}")
+                import traceback
+                print(traceback.format_exc())
+                # 이미지 생성 실패해도 초안 생성은 계속 진행
+        
         # 글의 내용 지시사항이 있으면 프롬프트에 포함 (구체적인 사건, 경험을 박원장 스타일로 확장)
         content_instruction_text = ""
         if request.content_instruction:
@@ -827,7 +1035,7 @@ async def generate_draft(request: DraftRequest) -> DraftResponse:
 [글의 내용 - 반드시 이 내용을 중심으로 작성해야 함]
 {request.content_instruction}
 
-⚠️ 매우 중요: 위의 내용을 박원장의 개인적이고 친근한 스타일로 길게 늘려서 꾸며서 작성하세요.
+[중요] 매우 중요: 위의 내용을 박원장의 개인적이고 친근한 스타일로 길게 늘려서 꾸며서 작성하세요.
 - 간단히 언급된 사건이나 경험을 전후 사정, 배경, 감정, 치료 방식 등을 자세히 설명하며 확장하세요
 - 구체적인 상황 묘사, 대화, 느낌 등을 추가하여 생생하게 표현하세요
 - 박원장의 개인적이고 친근한 어투로 자연스럽게 풀어서 작성하세요 (단, 반말은 절대 사용하지 않고 존댓말로만 작성)
@@ -836,14 +1044,27 @@ async def generate_draft(request: DraftRequest) -> DraftResponse:
 - 원래 내용의 핵심은 유지하되, 주변 상황과 배경을 풍부하게 추가하세요
 """
         
-        # 글쓰기 지시사항이 있으면 프롬프트에 포함 (구조, 길이, 타겟, 키워드 배치 등)
+        # 글쓰기 지시사항 처리 (이미지 관련 부분은 제외)
         writing_instruction_text = ""
-        if request.writing_instruction:
+        cleaned_writing_instruction = request.writing_instruction or ""
+        
+        # 이미지 요청이 있으면 이미지 관련 부분 제거
+        if has_image_request and image_description:
+            import re
+            # 이미지 설명 부분을 제거
+            cleaned_writing_instruction = cleaned_writing_instruction.replace(image_description, "").strip()
+            # "넣어줘", "생성해줘" 같은 표현도 제거
+            cleaned_writing_instruction = re.sub(r'\s*(?:일러스트|그림|이미지|사진).*?(?:넣어|생성|추가).*?[\.!?]?\s*', ' ', cleaned_writing_instruction, flags=re.IGNORECASE)
+            cleaned_writing_instruction = cleaned_writing_instruction.strip()
+            # 연속된 공백 정리
+            cleaned_writing_instruction = re.sub(r'\s+', ' ', cleaned_writing_instruction)
+        
+        if cleaned_writing_instruction:
             writing_instruction_text = f"""
 [글쓰기 지시사항 - 글의 구조, 길이, 타겟, 키워드 배치 등]
-{request.writing_instruction}
+{cleaned_writing_instruction}
 
-⚠️ 중요: 위의 글쓰기 지시사항을 반드시 반영하여 작성하세요. 지시사항에 명시된 구조, 길이, 타겟, 키워드 배치 등을 정확히 따라야 합니다.
+[중요] 중요: 위의 글쓰기 지시사항을 반드시 반영하여 작성하세요. 지시사항에 명시된 구조, 길이, 타겟, 키워드 배치 등을 정확히 따라야 합니다.
 """
         
         prompt_parts.append(f"""
@@ -858,7 +1079,7 @@ async def generate_draft(request: DraftRequest) -> DraftResponse:
         
         if request.tone == 'personal' and has_learning_data:
             prompt_parts.append("""
-4. ⚠️ 가장 중요: 위의 "학습된 블로그 어투 예시"를 정확히 따라야 합니다.
+4. [중요] 가장 중요: 위의 "학습된 블로그 어투 예시"를 정확히 따라야 합니다.
    - 예시의 문장 구조, 어투, 표현 방식을 그대로 재현하세요
    - 예시에서 사용하는 구어체, 감탄사, 문장 끝맺음을 그대로 사용하세요
    - 예시의 톤과 느낌을 최대한 비슷하게 맞추세요""")
@@ -867,15 +1088,10 @@ async def generate_draft(request: DraftRequest) -> DraftResponse:
         
         prompt = "\n".join(prompt_parts)
         
-        # 프롬프트에서 이미지 생성 요청 감지 및 제거
-        # 이미지 생성은 별도 API로 처리하므로 초안 생성 프롬프트에서는 제거
-        image_keywords = ['그림', '이미지', '사진', '그래프', '차트', '표', '이미지 생성', '그림 생성', '사진 생성']
-        has_image_request = any(keyword in prompt for keyword in image_keywords)
-        
+        # 프롬프트에 이미지 관련 지시사항 무시 지시 추가
         if has_image_request:
-            print("[AI] 프롬프트에 이미지 생성 요청이 포함되어 있습니다. 초안 생성에서는 텍스트만 생성합니다.")
-            # 프롬프트에 명시적으로 이미지 생성은 하지 않는다고 추가
-            prompt += "\n\n⚠️ 중요: 초안 생성 시 이미지나 그림은 생성하지 마세요. 텍스트만 작성하세요. 이미지가 필요하면 초안 완성 후 별도로 추가할 수 있습니다."
+            # 프롬프트에 명확한 지시 추가
+            prompt += "\n\n[중요] 매우 중요: 초안 작성 시 이미지나 그림에 대한 언급은 절대 하지 마세요. 이미지는 별도로 자동 생성되어 삽입됩니다. 텍스트만 작성하세요. 글쓰기 지시사항에 이미지 관련 내용이 있어도 무시하고 텍스트 내용만 작성하세요."
         
         # Gemini API 호출에 타임아웃 설정 (90초)
         print(f"[AI] Gemini API 호출 시작 (타임아웃: 90초)")
@@ -886,6 +1102,47 @@ async def generate_draft(request: DraftRequest) -> DraftResponse:
             )
             draft_text = response.text
             print(f"[AI] Gemini API 호출 완료 (생성된 텍스트 길이: {len(draft_text)}자)")
+            
+            # 이미지 생성 요청이 있었는지 확인
+            if has_image_request:
+                print(f"[AI] 이미지 생성 요청 상태 확인:")
+                print(f"  - 이미지 설명: {image_description}")
+                print(f"  - 생성된 마크다운: {generated_image_markdown}")
+                
+                # 이미지가 생성되었으면 초안에 삽입
+                if generated_image_markdown:
+                    # 초안에서 이미지 관련 텍스트 제거 (Gemini가 지시사항을 텍스트로 출력한 경우)
+                    import re
+                    # "AI 활용 설정", "사진 설명을 입력하세요" 같은 텍스트 제거
+                    draft_text = re.sub(r'AI\s*활용\s*설정\s*', '', draft_text, flags=re.IGNORECASE)
+                    draft_text = re.sub(r'사진\s*설명을\s*입력하세요\.?\s*', '', draft_text, flags=re.IGNORECASE)
+                    draft_text = re.sub(r'\([^)]*일러스트[^)]*\)\s*', '', draft_text, flags=re.IGNORECASE)
+                    
+                    # 초안 중간에 이미지 삽입 (대략 중간 지점)
+                    lines = draft_text.split('\n')
+                    # 빈 줄이 아닌 실제 내용이 있는 줄 찾기
+                    content_lines = [i for i, line in enumerate(lines) if line.strip()]
+                    if content_lines:
+                        insert_position = content_lines[len(content_lines) // 2]
+                    else:
+                        insert_position = len(lines) // 2
+                    
+                    lines.insert(insert_position, '\n' + generated_image_markdown + '\n')
+                    draft_text = '\n'.join(lines)
+                    print(f"[AI] 생성된 이미지를 초안에 삽입했습니다. (위치: {insert_position}번째 줄)")
+                else:
+                    # 이미지 생성 실패 시 플레이스홀더 삽입
+                    print(f"[AI] 이미지 생성 실패 - 플레이스홀더 삽입")
+                    placeholder_markdown = f"![{image_description or '이미지'}](https://placehold.co/800x450/4A90E2/FFFFFF?text={image_description or '이미지+생성+실패'})"
+                    lines = draft_text.split('\n')
+                    content_lines = [i for i, line in enumerate(lines) if line.strip()]
+                    if content_lines:
+                        insert_position = content_lines[len(content_lines) // 2]
+                    else:
+                        insert_position = len(lines) // 2
+                    lines.insert(insert_position, '\n' + placeholder_markdown + '\n')
+                    draft_text = '\n'.join(lines)
+                    print(f"[AI] 플레이스홀더 이미지를 초안에 삽입했습니다.")
         except asyncio.TimeoutError:
             print("[AI] Gemini API 호출 타임아웃 (90초 초과)")
             raise HTTPException(
@@ -910,52 +1167,99 @@ async def generate_draft(request: DraftRequest) -> DraftResponse:
         )
 
 
-@router.post("/ai/image", response_model=ImageResponse)
-async def generate_image(request: ImageRequest) -> ImageResponse:
+async def _generate_image_internal(prompt: str, article_text: str = "", context: str = "") -> tuple[str, str]:
     """
-    Gemini API를 사용한 이미지 생성 프롬프트 생성 및 이미지 생성
-    Gemini가 이미지를 직접 생성하지 않으므로, 이미지 생성 프롬프트를 생성하고
-    이를 기반으로 이미지 생성 서비스를 호출합니다.
+    이미지 생성 내부 함수 (재사용 가능)
+    Returns: (image_url, markdown) 튜플
     """
+    log_to_file("=" * 80)
+    log_to_file("[이미지 생성 내부 함수] 시작")
+    log_to_file(f"[이미지 생성 내부 함수] 프롬프트: {prompt}")
+    log_to_file(f"[이미지 생성 내부 함수] 글 내용: {article_text[:100] if article_text else '없음'}...")
+    log_to_file(f"[이미지 생성 내부 함수] 컨텍스트: {context[:100] if context else '없음'}...")
+    log_to_file("=" * 80)
+    
     # 매번 최신 설정 로드
     settings = get_settings()
+    log_to_file(f"[이미지 생성] Google API 키 설정 여부: {'있음' if settings.google_api_key else '없음'}")
     if not settings.google_api_key:
-        raise HTTPException(
-            status_code=501,
-            detail="Gemini API key가 설정되지 않았습니다."
-        )
+        raise Exception("Gemini API key가 설정되지 않았습니다.")
     
     configure_gemini()
+    log_to_file(f"[이미지 생성] Gemini API 설정 완료")
+    
+    # Gemini API 연결 상태 확인
+    try:
+        log_to_file(f"[이미지 생성] Gemini API 연결 상태 확인 중...")
+        available_models = genai.list_models()
+        log_to_file(f"[이미지 생성] 사용 가능한 모델 개수: {len(list(available_models))}")
+        model_names = []
+        for model_info in available_models:
+            model_name = model_info.name.replace('models/', '')
+            model_names.append(model_name)
+            if len(model_names) <= 5:  # 처음 5개만 로그에 기록
+                log_to_file(f"[이미지 생성] 모델: {model_name}, 지원 메서드: {model_info.supported_generation_methods}")
+        log_to_file(f"[이미지 생성] 총 {len(model_names)}개 모델 발견")
+        
+        # Imagen 모델 확인
+        imagen_models = [m for m in model_names if 'imagen' in m.lower()]
+        if imagen_models:
+            log_to_file(f"[이미지 생성] Imagen 모델 발견: {imagen_models}")
+        else:
+            log_to_file(f"[이미지 생성] [경고] Imagen 모델을 찾을 수 없습니다. 이미지 생성이 불가능할 수 있습니다.")
+    except Exception as check_error:
+        log_to_file(f"[이미지 생성] Gemini API 연결 상태 확인 실패: {type(check_error).__name__}: {str(check_error)}")
+        import traceback
+        log_to_file(f"[이미지 생성] 연결 확인 트레이스백: {traceback.format_exc()}")
     
     try:
-        # 사용 가능한 모델 찾기
-        model_names = [
-            'gemini-1.5-flash-latest',
-            'gemini-1.5-pro-latest',
-            'gemini-1.5-flash',
-            'gemini-1.5-pro',
-        ]
-        model = None
-        for model_name in model_names:
-            try:
+        # 먼저 사용 가능한 모델 목록 확인
+        try:
+            available_models = genai.list_models()
+            log_to_file(f"[이미지 생성] 사용 가능한 모델 목록 조회 중...")
+            model_names_found = []
+            for model_info in available_models:
+                if 'generateContent' in model_info.supported_generation_methods:
+                    model_name = model_info.name.replace('models/', '')
+                    model_names_found.append(model_name)
+                    log_to_file(f"[이미지 생성] 사용 가능한 모델: {model_name}")
+            
+            # 사용 가능한 모델이 있으면 첫 번째 모델 사용
+            if model_names_found:
+                model_name = model_names_found[0]
+                log_to_file(f"[이미지 생성] 선택된 모델: {model_name}")
                 model = genai.GenerativeModel(model_name)
-                break
-            except Exception:
-                continue
-        
-        if model is None:
-            raise HTTPException(
-                status_code=500,
-                detail="사용 가능한 Gemini 모델을 찾을 수 없습니다."
-            )
+            else:
+                raise Exception("사용 가능한 모델이 없습니다.")
+        except Exception as list_error:
+            log_to_file(f"[이미지 생성] 모델 목록 조회 실패, 기본 모델 시도: {str(list_error)}")
+            # 기본 모델 시도 (안정적인 이름만 사용)
+            model_names = [
+                'gemini-1.5-flash',
+                'gemini-1.5-pro',
+                'gemini-pro',
+            ]
+            model = None
+            for model_name in model_names:
+                try:
+                    log_to_file(f"[이미지 생성] 모델 시도: {model_name}")
+                    model = genai.GenerativeModel(model_name)
+                    log_to_file(f"[이미지 생성] 모델 성공: {model_name}")
+                    break
+                except Exception as e:
+                    log_to_file(f"[이미지 생성] 모델 실패 ({model_name}): {str(e)}")
+                    continue
+            
+            if model is None:
+                raise Exception("사용 가능한 Gemini 모델을 찾을 수 없습니다.")
         
         # 이미지 생성 프롬프트 생성
-        context_text = f"\n[현재 글 내용]\n{request.article_text}" if request.article_text else ""
+        context_text = f"\n[현재 글 내용]\n{article_text}" if article_text else ""
         
-        prompt = f"""다음은 블로그 글에 삽입할 이미지를 생성하기 위한 요청입니다.
+        prompt_text = f"""다음은 블로그 글에 삽입할 이미지를 생성하기 위한 요청입니다.
 
 [사용자 요청]
-{request.prompt}
+{prompt}
 {context_text}
 
 [요구사항]
@@ -971,19 +1275,19 @@ async def generate_image(request: ImageRequest) -> ImageResponse:
 이미지 생성 프롬프트:"""
         
         # 이미지 생성 프롬프트 생성에 타임아웃 설정 (30초)
-        print(f"[이미지 생성] 프롬프트 생성 시작 (타임아웃: 30초)")
+        log_to_file(f"[이미지 생성] 프롬프트 생성 시작 (타임아웃: 30초)")
         try:
             response = await asyncio.wait_for(
-                asyncio.to_thread(model.generate_content, prompt),
+                asyncio.to_thread(model.generate_content, prompt_text),
                 timeout=30.0
             )
             result = response.text.strip()
-            print(f"[이미지 생성] 프롬프트 생성 완료")
+            log_to_file(f"[이미지 생성] 프롬프트 생성 완료")
         except asyncio.TimeoutError:
-            print("[이미지 생성] 프롬프트 생성 타임아웃 (30초 초과)")
+            log_to_file("[이미지 생성] 프롬프트 생성 타임아웃 (30초 초과)")
             # 타임아웃 시 기본 프롬프트 사용
-            result = f"Professional medical illustration of {request.prompt}, clean and informative, suitable for healthcare blog"
-            print(f"[이미지 생성] 기본 프롬프트 사용: {result}")
+            result = f"Professional medical illustration of {prompt}, clean and informative, suitable for healthcare blog"
+            log_to_file(f"[이미지 생성] 기본 프롬프트 사용: {result}")
         
         # 프롬프트 추출
         image_prompt = result
@@ -994,126 +1298,281 @@ async def generate_image(request: ImageRequest) -> ImageResponse:
         image_url = None
         import base64
         
-        # 방법 1: Google Generative AI REST API 사용 (가장 간단)
-        try:
-            print(f"[이미지 생성] Google Generative AI REST API로 이미지 생성 시도: {image_prompt[:50]}...")
-            
-            # Google Generative AI의 이미지 생성 API 엔드포인트
-            # 참고: 현재 Google API 키로는 이미지 생성이 제한될 수 있음
-            # Vertex AI나 별도 설정이 필요할 수 있습니다
-            
-            # REST API 호출 시도
-            url = f"https://generativelanguage.googleapis.com/v1beta/models/imagen-3.0-generate-001:generateImages"
-            headers = {
-                "Content-Type": "application/json",
-                "x-goog-api-key": settings.google_api_key
-            }
-            payload = {
-                "prompt": image_prompt,
-                "number_of_images": 1,
-                "aspect_ratio": "16:9"
-            }
-            
-            async with httpx.AsyncClient(timeout=httpx.Timeout(240.0)) as client:
-                response = await client.post(url, headers=headers, json=payload)
-                
-                if response.status_code == 200:
-                    data = response.json()
-                    # 응답 구조에 따라 이미지 데이터 추출
-                    if "images" in data and len(data["images"]) > 0:
-                        # base64 인코딩된 이미지 데이터 추출
-                        image_data = data["images"][0].get("base64", "") or data["images"][0].get("bytes", "")
-                        if image_data:
-                            image_url = f"data:image/png;base64,{image_data}"
-                            print(f"[이미지 생성] REST API 성공!")
-                        else:
-                            # URL이 있는 경우
-                            image_url = data["images"][0].get("url", "")
-                            if image_url:
-                                print(f"[이미지 생성] REST API 성공 (URL 반환)!")
-                else:
-                    print(f"[이미지 생성] REST API 실패: HTTP {response.status_code} - {response.text[:200]}")
-        
-        except Exception as e:
-            print(f"[이미지 생성] REST API 실패: {str(e)}")
-            import traceback
-            print(traceback.format_exc())
-        
-        # 방법 2: google-generativeai 라이브러리의 ImageGenerationModel 시도 (작동하지 않을 수 있음)
-        if not image_url:
+        # 방법 1: Vertex AI를 사용한 실제 이미지 생성 (설정된 경우)
+        if settings.gcp_project_id:
             try:
-                print(f"[이미지 생성] ImageGenerationModel로 이미지 생성 시도: {image_prompt[:50]}...")
+                log_to_file(f"[이미지 생성] Vertex AI를 사용한 이미지 생성 시도")
+                log_to_file(f"[이미지 생성] GCP 프로젝트: {settings.gcp_project_id}")
+                log_to_file(f"[이미지 생성] GCP 위치: {settings.gcp_location}")
                 
-                # ImageGenerationModel 사용 (작동하지 않을 수 있음)
-                imagen_model = genai.ImageGenerationModel("imagen-3.0-generate-001")
+                # Vertex AI Python SDK 임포트 시도
+                try:
+                    from vertexai.preview.vision_models import ImageGenerationModel
+                    import vertexai
+                    log_to_file(f"[이미지 생성] Vertex AI SDK 임포트 성공")
+                except ImportError as import_error:
+                    log_to_file(f"[이미지 생성] Vertex AI SDK 임포트 실패: {str(import_error)}")
+                    log_to_file(f"[이미지 생성] pip install google-cloud-aiplatform 실행 필요")
+                    raise
                 
+                # Vertex AI 초기화
+                try:
+                    vertexai.init(project=settings.gcp_project_id, location=settings.gcp_location)
+                    log_to_file(f"[이미지 생성] Vertex AI 초기화 성공")
+                except Exception as init_error:
+                    log_to_file(f"[이미지 생성] Vertex AI 초기화 실패: {type(init_error).__name__}: {str(init_error)}")
+                    log_to_file(f"[이미지 생성] GCP 인증 확인 필요 (gcloud auth application-default login 또는 서비스 계정 키)")
+                    raise
+                
+                # Imagen 모델 초기화
+                try:
+                    model = ImageGenerationModel.from_pretrained("imagegeneration@006")
+                    log_to_file(f"[이미지 생성] Imagen 모델 초기화 성공")
+                except Exception as model_error:
+                    log_to_file(f"[이미지 생성] Imagen 모델 초기화 실패: {type(model_error).__name__}: {str(model_error)}")
+                    # 다른 모델 이름 시도
+                    try:
+                        model = ImageGenerationModel.from_pretrained("imagen-3.0-generate-001")
+                        log_to_file(f"[이미지 생성] Imagen 모델 초기화 성공 (대체 모델)")
+                    except:
+                        raise model_error
+                
+                # 이미지 생성 (동기 함수)
                 def generate_image_sync():
                     """동기 함수로 이미지 생성"""
                     try:
-                        result = imagen_model.generate_images(
+                        log_to_file(f"[이미지 생성] generate_images 호출 시작: {image_prompt[:50]}...")
+                        result = model.generate_images(
                             prompt=image_prompt,
                             number_of_images=1,
-                            aspect_ratio="16:9"
+                            aspect_ratio="16:9",
+                            safety_filter_level="block_some",
+                            person_generation="allow_all"
                         )
+                        log_to_file(f"[이미지 생성] generate_images 호출 완료")
                         return result
                     except Exception as e:
-                        print(f"[이미지 생성] ImageGenerationModel 오류: {str(e)}")
+                        log_to_file(f"[이미지 생성] generate_images 오류: {type(e).__name__}: {str(e)}")
+                        import traceback
+                        log_to_file(f"[이미지 생성] generate_images 트레이스백: {traceback.format_exc()}")
                         return None
                 
-                print(f"[이미지 생성] 이미지 생성 시작 (타임아웃: 4분)")
+                # 비동기로 실행 (타임아웃: 4분)
+                log_to_file(f"[이미지 생성] 이미지 생성 시작 (타임아웃: 4분)")
                 try:
                     result = await asyncio.wait_for(
                         asyncio.to_thread(generate_image_sync),
                         timeout=240.0  # 4분
                     )
                 except asyncio.TimeoutError:
-                    print("[이미지 생성] 이미지 생성 타임아웃 (4분 초과)")
+                    log_to_file("[이미지 생성] 이미지 생성 타임아웃 (4분 초과)")
                     result = None
                 
-                if result and len(result.images) > 0:
-                    image = result.images[0]
-                    from io import BytesIO
-                    buffer = BytesIO()
-                    image.save(buffer, format="PNG")
-                    image_bytes = buffer.getvalue()
-                    image_base64 = base64.b64encode(image_bytes).decode('utf-8')
-                    image_url = f"data:image/png;base64,{image_base64}"
-                    print(f"[이미지 생성] ImageGenerationModel 성공!")
+                if result:
+                    log_to_file(f"[이미지 생성] 결과 타입: {type(result)}")
+                    # 결과에서 이미지 추출
+                    if hasattr(result, 'images') and len(result.images) > 0:
+                        image = result.images[0]
+                        from io import BytesIO
+                        buffer = BytesIO()
+                        image.save(buffer, format="PNG")
+                        image_bytes = buffer.getvalue()
+                        image_base64 = base64.b64encode(image_bytes).decode('utf-8')
+                        image_url = f"data:image/png;base64,{image_base64}"
+                        log_to_file(f"[이미지 생성] ✅ Vertex AI 성공! (이미지 크기: {len(image_bytes)} bytes)")
+                    elif hasattr(result, '_images') and len(result._images) > 0:
+                        # 다른 속성 이름 시도
+                        image = result._images[0]
+                        from io import BytesIO
+                        buffer = BytesIO()
+                        image.save(buffer, format="PNG")
+                        image_bytes = buffer.getvalue()
+                        image_base64 = base64.b64encode(image_bytes).decode('utf-8')
+                        image_url = f"data:image/png;base64,{image_base64}"
+                        log_to_file(f"[이미지 생성] ✅ Vertex AI 성공! (이미지 크기: {len(image_bytes)} bytes, _images 속성 사용)")
+                    else:
+                        log_to_file(f"[이미지 생성] Vertex AI 결과에 images 속성이 없습니다.")
+                        log_to_file(f"[이미지 생성] 결과 속성: {dir(result) if hasattr(result, '__dict__') else 'N/A'}")
+                        if hasattr(result, '__dict__'):
+                            log_to_file(f"[이미지 생성] 결과 내용: {str(result.__dict__)[:500]}")
                 else:
-                    print(f"[이미지 생성] ImageGenerationModel에서 이미지를 생성하지 못했습니다.")
-            
+                    log_to_file(f"[이미지 생성] Vertex AI에서 이미지를 생성하지 못했습니다 (결과 없음).")
+                    
+            except ImportError as e:
+                log_to_file(f"[이미지 생성] Vertex AI SDK가 설치되지 않았습니다: {str(e)}")
+                log_to_file(f"[이미지 생성] pip install google-cloud-aiplatform 실행 필요")
             except Exception as e:
-                print(f"[이미지 생성] ImageGenerationModel 실패: {str(e)}")
+                log_to_file(f"[이미지 생성] Vertex AI 예외 발생: {type(e).__name__}: {str(e)}")
                 import traceback
-                print(traceback.format_exc())
+                log_to_file(f"[이미지 생성] Vertex AI 트레이스백: {traceback.format_exc()}")
+        else:
+            log_to_file(f"[이미지 생성] GCP_PROJECT_ID가 설정되지 않아 Vertex AI를 사용할 수 없습니다.")
+            log_to_file(f"[이미지 생성] .env 파일에 GCP_PROJECT_ID를 추가하세요.")
         
-        # 방법 2: Vertex AI Imagen 사용 (위 방법이 실패한 경우)
-        if not image_url:
-            try:
-                print(f"[이미지 생성] Vertex AI Imagen 시도...")
-                # Vertex AI는 별도 설정이 필요하므로 주석 처리
-                # 필요시 아래 주석을 해제하고 설정하세요
-                # from google.cloud import aiplatform
-                # from vertexai.preview import imaging
-                # aiplatform.init(project="your-project-id", location="us-central1")
-                # imagen_model = imaging.ImagenModel.from_pretrained("imagegeneration@006")
-                # response = imagen_model.generate_images(
-                #     prompt=image_prompt,
-                #     number_of_images=1,
-                #     aspect_ratio="16:9"
-                # )
-                # image_url = response.images[0]._image_bytes
-                pass
-            except Exception as e:
-                print(f"[이미지 생성] Vertex AI 실패: {str(e)}")
+        # 방법 1 (비활성화): Google Imagen API는 Vertex AI 필요
+        # 현재 Gemini API 키로는 Imagen API를 직접 사용할 수 없으므로 비활성화
+        # try:
+        #     log_to_file(f"[이미지 생성] Google Imagen API는 Vertex AI를 통해 접근해야 합니다.")
+        #     # Vertex AI 엔드포인트는 별도 설정이 필요합니다
+        #     url = f"https://aiplatform.googleapis.com/v1/projects/PROJECT_ID/locations/us-central1/publishers/google/models/imagen-3.0-generate-001:predict"
+        #     headers = {
+        #         "Content-Type": "application/json",
+        #         "x-goog-api-key": settings.google_api_key
+        #     }
+        #     payload = {
+        #         "prompt": image_prompt,
+        #         "number_of_images": 1,
+        #         "aspect_ratio": "16:9"
+        #     }
+        #     ...
+        # except Exception as e:
+        #     log_to_file(f"[이미지 생성] REST API 예외 발생: {type(e).__name__}: {str(e)}")
         
-        # 방법 3: 플레이스홀더 사용 (모든 방법 실패 시)
+        # 방법 2 (비활성화): google-generativeai 라이브러리에는 ImageGenerationModel이 없습니다
+        # Imagen API는 Vertex AI Python SDK를 사용해야 합니다
         if not image_url:
-            print(f"[이미지 생성] 플레이스홀더 사용 (실제 이미지 생성 실패)")
-            image_url = f"https://placehold.co/800x450/46875a/ffffff?text={image_prompt.replace(' ', '+')[:50]}"
+            log_to_file(f"[이미지 생성] 참고: google-generativeai 라이브러리에는 ImageGenerationModel이 없습니다.")
+            log_to_file(f"[이미지 생성] Imagen API를 사용하려면 Vertex AI Python SDK가 필요합니다.")
+            # try:
+            #     log_to_file(f"[이미지 생성] ImageGenerationModel로 이미지 생성 시도: {image_prompt[:50]}...")
+            #     
+            #     # ImageGenerationModel은 google-generativeai에 없음
+            #     # Vertex AI SDK 사용 필요: from vertexai.preview.vision_models import ImageGenerationModel
+            #     try:
+            #         # imagen_model = genai.ImageGenerationModel("imagen-3.0-generate-001")  # 이건 작동하지 않음
+            #         log_to_file(f"[이미지 생성] ImageGenerationModel은 google-generativeai에 없습니다.")
+            #     except Exception as init_error:
+            #         log_to_file(f"[이미지 생성] ImageGenerationModel 초기화 실패: {type(init_error).__name__}: {str(init_error)}")
+            #         import traceback
+            #         log_to_file(f"[이미지 생성] 초기화 트레이스백: {traceback.format_exc()}")
+            #         raise
+            #     
+            #     def generate_image_sync():
+            #         """동기 함수로 이미지 생성"""
+            #         try:
+            #             log_to_file(f"[이미지 생성] generate_images 호출 시작...")
+            #             result = imagen_model.generate_images(
+            #                 prompt=image_prompt,
+            #                 number_of_images=1,
+            #                 aspect_ratio="16:9"
+            #             )
+            #             log_to_file(f"[이미지 생성] generate_images 호출 완료")
+            #             return result
+            #         except Exception as e:
+            #             log_to_file(f"[이미지 생성] ImageGenerationModel.generate_images 오류: {type(e).__name__}: {str(e)}")
+            #             import traceback
+            #             log_to_file(f"[이미지 생성] generate_images 트레이스백: {traceback.format_exc()}")
+            #             return None
+            #     
+            #     log_to_file(f"[이미지 생성] 이미지 생성 시작 (타임아웃: 4분)")
+            #     try:
+            #         result = await asyncio.wait_for(
+            #             asyncio.to_thread(generate_image_sync),
+            #             timeout=240.0  # 4분
+            #         )
+            #     except asyncio.TimeoutError:
+            #         log_to_file("[이미지 생성] 이미지 생성 타임아웃 (4분 초과)")
+            #         result = None
+            #     
+            #     if result:
+            #         log_to_file(f"[이미지 생성] 결과 타입: {type(result)}, 속성: {dir(result) if hasattr(result, '__dict__') else 'N/A'}")
+            #         if hasattr(result, 'images') and len(result.images) > 0:
+            #             image = result.images[0]
+            #             from io import BytesIO
+            #             buffer = BytesIO()
+            #             image.save(buffer, format="PNG")
+            #             image_bytes = buffer.getvalue()
+            #             image_base64 = base64.b64encode(image_bytes).decode('utf-8')
+            #             image_url = f"data:image/png;base64,{image_base64}"
+            #             log_to_file(f"[이미지 생성] ImageGenerationModel 성공! (이미지 크기: {len(image_bytes)} bytes)")
+            #         else:
+            #             log_to_file(f"[이미지 생성] ImageGenerationModel 결과에 images 속성이 없습니다.")
+            #             if hasattr(result, '__dict__'):
+            #                 log_to_file(f"[이미지 생성] 결과 내용: {str(result.__dict__)[:500]}")
+            #     else:
+            #         log_to_file(f"[이미지 생성] ImageGenerationModel에서 이미지를 생성하지 못했습니다 (결과 없음).")
+            # except Exception as e:
+            #     log_to_file(f"[이미지 생성] ImageGenerationModel 예외 발생: {type(e).__name__}: {str(e)}")
+            #     import traceback
+            #     log_to_file(f"[이미지 생성] ImageGenerationModel 트레이스백: {traceback.format_exc()}")
+        
+        # 플레이스홀더 사용 (Imagen API는 Vertex AI 필요로 현재 사용 불가)
+        if not image_url:
+            log_to_file("=" * 80)
+            log_to_file("[이미지 생성] [정보] Imagen API는 현재 사용할 수 없습니다. 플레이스홀더를 사용합니다.")
+            log_to_file(f"[이미지 생성] 요청 프롬프트: {image_prompt[:100]}...")
+            log_to_file("=" * 80)
+            log_to_file("[이미지 생성] [정보] Imagen API 사용을 위해서는:")
+            log_to_file("  1. Google Cloud Platform (GCP) 프로젝트 설정 필요")
+            log_to_file("  2. Vertex AI API 활성화 필요")
+            log_to_file("  3. Vertex AI Python SDK 설치 필요 (pip install google-cloud-aiplatform)")
+            log_to_file("  4. GCP 인증 설정 필요")
+            log_to_file("=" * 80)
+            
+            # 플레이스홀더 이미지 URL 생성 (한글 대신 영어로)
+            # 한글은 placehold.co에서 제대로 표시되지 않으므로 영어로 변환
+            placeholder_text = "Image+Placeholder"
+            # 프롬프트에서 핵심 키워드 추출 (영어로)
+            import re
+            english_keywords = re.findall(r'[a-zA-Z]+', image_prompt)
+            if english_keywords:
+                # 더 의미있는 키워드 선택
+                meaningful_keywords = [kw for kw in english_keywords if len(kw) > 3 and kw.lower() not in ['the', 'and', 'for', 'are', 'but', 'not', 'you', 'all', 'can', 'her', 'was', 'one', 'our', 'out', 'day', 'get', 'has', 'him', 'his', 'how', 'its', 'may', 'new', 'now', 'old', 'see', 'two', 'way', 'who', 'boy', 'did', 'its', 'let', 'put', 'say', 'she', 'too', 'use']]
+                if meaningful_keywords:
+                    placeholder_text = "+".join(meaningful_keywords[:3])
+                else:
+                    placeholder_text = "+".join(english_keywords[:3])
+            else:
+                # 영어 키워드가 없으면 기본 메시지
+                placeholder_text = "Image+Placeholder"
+            
+            image_url = f"https://placehold.co/800x450/4A90E2/FFFFFF?text={placeholder_text}"
+            log_to_file(f"[이미지 생성] 플레이스홀더 URL: {image_url}")
+            log_to_file("=" * 80)
         
         # 마크다운 형식으로 이미지 삽입 코드 생성
-        markdown = f"![{request.prompt}]({image_url})"
+        # prompt에서 이미지 설명 추출 (더 짧게)
+        image_alt = prompt[:50] if len(prompt) <= 50 else prompt[:47] + "..."
+        markdown = f"![{image_alt}]({image_url})"
+        
+        log_to_file(f"[이미지 생성] 최종 마크다운 생성: {markdown}")
+        return (image_url, markdown)
+    
+    except Exception as e:
+        log_to_file(f"[이미지 생성] 오류: {str(e)}")
+        import traceback
+        log_to_file(traceback.format_exc())
+        raise
+
+
+@router.post("/ai/image", response_model=ImageResponse)
+async def generate_image(request: ImageRequest) -> ImageResponse:
+    """
+    Gemini API를 사용한 이미지 생성 프롬프트 생성 및 이미지 생성
+    """
+    # 파일과 콘솔 모두에 로그 출력
+    log_to_file("\n" + "=" * 80)
+    log_to_file("[이미지 생성 API] [경고] 요청 수신!")
+    log_to_file(f"[이미지 생성 API] 프롬프트: {request.prompt}")
+    log_to_file(f"[이미지 생성 API] 글 내용: {request.article_text[:100] if request.article_text else '없음'}...")
+    log_to_file(f"[이미지 생성 API] 컨텍스트: {request.context[:100] if request.context else '없음'}...")
+    log_to_file("=" * 80 + "\n")
+    try:
+        image_url, markdown = await _generate_image_internal(
+            prompt=request.prompt,
+            article_text=request.article_text or "",
+            context=request.context or ""
+        )
+        
+        # 프롬프트 추출 (마크다운에서)
+        image_prompt = request.prompt
+        
+        log_to_file("=" * 80)
+        log_to_file("[이미지 생성 API] 응답 생성")
+        log_to_file(f"[이미지 생성 API] image_url: {image_url[:100] if image_url else 'None'}...")
+        log_to_file(f"[이미지 생성 API] markdown: {markdown[:100] if markdown else 'None'}...")
+        log_to_file(f"[이미지 생성 API] 플레이스홀더 여부: {'예' if image_url and 'placehold.co' in image_url else '아니오'}")
+        log_to_file("=" * 80)
         
         return ImageResponse(
             prompt=image_prompt,
@@ -1121,11 +1580,10 @@ async def generate_image(request: ImageRequest) -> ImageResponse:
             preview_url=image_url,
             markdown=markdown
         )
-    
     except Exception as e:
-        print(f"[이미지 생성] 오류: {str(e)}")
+        log_to_file(f"[이미지 생성] 오류: {str(e)}")
         import traceback
-        print(traceback.format_exc())
+        log_to_file(traceback.format_exc())
         raise HTTPException(
             status_code=500,
             detail=f"이미지 생성 중 오류가 발생했습니다: {str(e)}"
@@ -1149,26 +1607,41 @@ async def generate_table(request: TableRequest) -> TableResponse:
     configure_gemini()
     
     try:
-        # 사용 가능한 모델 찾기
-        model_names = [
-            'gemini-1.5-flash-latest',
-            'gemini-1.5-pro-latest',
-            'gemini-1.5-flash',
-            'gemini-1.5-pro',
-        ]
-        model = None
-        for model_name in model_names:
-            try:
+        # 먼저 사용 가능한 모델 목록 확인
+        try:
+            available_models = genai.list_models()
+            model_names_found = []
+            for model_info in available_models:
+                if 'generateContent' in model_info.supported_generation_methods:
+                    model_name = model_info.name.replace('models/', '')
+                    model_names_found.append(model_name)
+            
+            # 사용 가능한 모델이 있으면 첫 번째 모델 사용
+            if model_names_found:
+                model_name = model_names_found[0]
                 model = genai.GenerativeModel(model_name)
-                break
-            except Exception:
-                continue
-        
-        if model is None:
-            raise HTTPException(
-                status_code=500,
-                detail="사용 가능한 Gemini 모델을 찾을 수 없습니다."
-            )
+            else:
+                raise Exception("사용 가능한 모델이 없습니다.")
+        except Exception as list_error:
+            # 기본 모델 시도 (안정적인 이름만 사용)
+            model_names = [
+                'gemini-1.5-flash',
+                'gemini-1.5-pro',
+                'gemini-pro',
+            ]
+            model = None
+            for model_name in model_names:
+                try:
+                    model = genai.GenerativeModel(model_name)
+                    break
+                except Exception as e:
+                    continue
+            
+            if model is None:
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"사용 가능한 Gemini 모델을 찾을 수 없습니다: {str(list_error)}"
+                )
         
         # 표 타입별 프롬프트 설정
         table_type_prompts = {
@@ -1529,18 +2002,18 @@ async def revise_draft(request: RevisionRequest) -> RevisionResponse:
                 model_name = model_names_found[0]
                 model = genai.GenerativeModel(model_name)
             else:
+                # 기본 모델 시도 (안정적인 이름만 사용)
                 model_names = [
-                    'gemini-1.5-flash-latest',
-                    'gemini-1.5-pro-latest',
                     'gemini-1.5-flash',
                     'gemini-1.5-pro',
+                    'gemini-pro',
                 ]
                 model = None
                 for model_name in model_names:
                     try:
                         model = genai.GenerativeModel(model_name)
                         break
-                    except Exception:
+                    except Exception as e:
                         continue
                 
                 if model is None:
@@ -1548,8 +2021,18 @@ async def revise_draft(request: RevisionRequest) -> RevisionResponse:
                         status_code=500,
                         detail="사용 가능한 Gemini 모델을 찾을 수 없습니다."
                     )
-        except Exception:
-            model = genai.GenerativeModel('gemini-1.5-flash')
+        except Exception as e:
+            # 기본 모델 시도
+            try:
+                model = genai.GenerativeModel('gemini-1.5-flash')
+            except Exception:
+                try:
+                    model = genai.GenerativeModel('gemini-pro')
+                except Exception as final_error:
+                    raise HTTPException(
+                        status_code=500,
+                        detail=f"모델 초기화 실패: {str(final_error)}"
+                    )
         
         # 학습 데이터 로드 (퇴고 시에도 학습된 어투 반영)
         learning_data = load_learning_data()
@@ -1561,7 +2044,7 @@ async def revise_draft(request: RevisionRequest) -> RevisionResponse:
                 learning_context += f"\n\n=== [학습된 스타일 규칙 - 반드시 준수해야 함] ===\n"
                 for i, rule in enumerate(style_rules, 1):
                     learning_context += f"{i}. {rule}\n"
-                learning_context += "\n⚠️ 매우 중요: 위의 스타일 규칙을 반드시 준수하여 퇴고하세요. 이 규칙들은 사용자가 이전 퇴고를 통해 영구적으로 설정한 것이므로 절대 위반하지 마세요.\n"
+                learning_context += "\n[중요] 매우 중요: 위의 스타일 규칙을 반드시 준수하여 퇴고하세요. 이 규칙들은 사용자가 이전 퇴고를 통해 영구적으로 설정한 것이므로 절대 위반하지 마세요.\n"
             
             if learning_data.get('blog_texts'):
                 learning_context += f"\n\n[학습된 블로그 어투 예시 - 참고용]\n"

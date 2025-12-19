@@ -34,6 +34,10 @@ class Settings:
     naver_client_id: str = os.getenv("NAVER_CLIENT_ID", "")
     naver_client_secret: str = os.getenv("NAVER_CLIENT_SECRET", "")
     google_api_key: str = os.getenv("GOOGLE_API_KEY", "")
+    # Vertex AI 설정 (선택사항 - 설정되면 실제 이미지 생성 사용)
+    gcp_project_id: str = os.getenv("GCP_PROJECT_ID", "")
+    gcp_location: str = os.getenv("GCP_LOCATION", "us-central1")
+    gcp_credentials_path: str = os.getenv("GOOGLE_APPLICATION_CREDENTIALS", "")
     
     def __init__(self):
         # 초기화 시 로깅
@@ -43,6 +47,16 @@ class Settings:
             print("[Settings] 경고: NAVER_CLIENT_ID가 설정되지 않았습니다!")
         if not self.naver_client_secret:
             print("[Settings] 경고: NAVER_CLIENT_SECRET가 설정되지 않았습니다!")
+        # Vertex AI 설정 확인
+        if self.gcp_project_id:
+            print(f"[Settings] GCP_PROJECT_ID: {self.gcp_project_id}")
+            print(f"[Settings] GCP_LOCATION: {self.gcp_location}")
+            if self.gcp_credentials_path:
+                print(f"[Settings] GOOGLE_APPLICATION_CREDENTIALS: {self.gcp_credentials_path}")
+            else:
+                print("[Settings] 참고: GOOGLE_APPLICATION_CREDENTIALS가 설정되지 않았습니다. gcloud auth를 사용하거나 서비스 계정 키를 설정하세요.")
+        else:
+            print("[Settings] 참고: GCP_PROJECT_ID가 설정되지 않았습니다. Vertex AI를 사용하려면 설정하세요.")
 
 
 _settings_cache = None
