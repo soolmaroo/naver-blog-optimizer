@@ -482,8 +482,18 @@ async def get_keyword_suggestions(
     print(f"[추천 키워드] API 키 확인 - ID: {'있음' if settings.naver_client_id else '없음'}, Secret: {'있음' if settings.naver_client_secret else '없음'}")
     if settings.naver_client_id:
         print(f"[추천 키워드] API ID 길이: {len(settings.naver_client_id)} (처음 10자: {settings.naver_client_id[:10]}...)")
+    
+    # API 키가 없으면 명확한 에러 메시지
     if not settings.naver_client_id or not settings.naver_client_secret:
-        print("경고: 네이버 API 키가 설정되지 않았습니다. 기본값을 사용합니다.")
+        print("=" * 80)
+        print("[추천 키워드] [경고] 네이버 API 키가 설정되지 않았습니다!")
+        print("[추천 키워드] 블로그 발행량과 일주일 검색량을 조회할 수 없습니다.")
+        print("[추천 키워드] 해결 방법:")
+        print("[추천 키워드] 1. 프로젝트 루트에 .env 파일 생성")
+        print("[추천 키워드] 2. NAVER_CLIENT_ID와 NAVER_CLIENT_SECRET 추가")
+        print("[추천 키워드] 3. 네이버 개발자 센터에서 API 키 발급")
+        print("[추천 키워드] 4. 백엔드 서버 재시작")
+        print("=" * 80)
     
     try:
         # 날씨 정보가 없으면 기본값 사용
@@ -866,53 +876,81 @@ async def analyze_keyword(request: KeywordAnalysisRequest) -> KeywordAnalysisRes
         )
     
     try:
+        print(f"[키워드 분석기] 분석 시작: {request.keyword}")
+        print(f"[키워드 분석기] 네이버 API 키 확인 - ID: {'있음' if settings.naver_client_id else '없음'}, Secret: {'있음' if settings.naver_client_secret else '없음'}")
+        
         # 일주일 검색량과 블로그 발행량을 병렬로 조회
         # get_search_volume과 get_weekly_search_volume 내부에 이미 타임아웃이 있으므로
         # 외부에서 추가 타임아웃을 걸지 않음
+        print(f"[키워드 분석기] 검색량 및 블로그 발행량 조회 시작 (병렬 처리)")
         search_volume_task = get_weekly_search_volume(request.keyword)
         blog_count_task = get_search_volume(request.keyword)
         
         # 두 작업을 병렬로 실행 (각 함수 내부의 타임아웃과 재시도 로직 사용)
-        search_volume_result, blog_count = await asyncio.gather(
-            search_volume_task,
-            blog_count_task,
-            return_exceptions=True
-        )
+        # 전체 타임아웃 추가 (60초) - 각 함수 내부 타임아웃(15초)보다 길게 설정
+        try:
+            search_volume_result, blog_count = await asyncio.wait_for(
+                asyncio.gather(
+                    search_volume_task,
+                    blog_count_task,
+                    return_exceptions=True
+                ),
+                timeout=60.0  # 전체 타임아웃 60초
+            )
+        except asyncio.TimeoutError:
+            print(f"[키워드 분석기] 전체 조회 타임아웃 (60초 초과) ({request.keyword})")
+            search_volume_result = None
+            blog_count = None
         
         # 검색량 처리 (get_weekly_search_volume은 튜플 (volume, is_actual_data) 반환)
+        print(f"[키워드 분석기] 검색량 결과 타입: {type(search_volume_result)}, 값: {search_volume_result}")
         if isinstance(search_volume_result, Exception):
-            print(f"일주일 검색량 조회 실패 ({request.keyword}): {type(search_volume_result).__name__}: {str(search_volume_result)}")
+            print(f"[키워드 분석기] 일주일 검색량 조회 실패 ({request.keyword}): {type(search_volume_result).__name__}: {str(search_volume_result)}")
             if isinstance(search_volume_result, asyncio.TimeoutError):
                 print(f"  -> 타임아웃 에러")
+            elif isinstance(search_volume_result, httpx.TimeoutException):
+                print(f"  -> HTTP 타임아웃 에러")
+            elif isinstance(search_volume_result, httpx.HTTPStatusError):
+                print(f"  -> HTTP 상태 에러: {search_volume_result.response.status_code if hasattr(search_volume_result, 'response') else 'N/A'}")
+            import traceback
+            print(f"[키워드 분석기] 검색량 예외 상세:")
+            print(traceback.format_exc())
             search_volume = None
         elif isinstance(search_volume_result, tuple) and len(search_volume_result) == 2:
             # 튜플인 경우 (volume, is_actual_data) 언패킹
             search_volume, is_actual_data = search_volume_result
-            print(f"[키워드 분석기] 검색량 조회 성공 ({request.keyword}): {search_volume} (실제 데이터: {is_actual_data})")
+            print(f"[키워드 분석기] [성공] 검색량 조회 성공 ({request.keyword}): {search_volume} (실제 데이터: {is_actual_data})")
         elif search_volume_result is None:
-            print(f"일주일 검색량 조회 결과 없음 ({request.keyword})")
+            print(f"[키워드 분석기] 일주일 검색량 조회 결과 없음 (None 반환) ({request.keyword})")
             search_volume = None
         else:
             # 예상치 못한 형식
-            print(f"[키워드 분석기] 검색량 결과 형식 오류 ({request.keyword}): {type(search_volume_result)}")
+            print(f"[키워드 분석기] [경고] 검색량 결과 형식 오류 ({request.keyword}): {type(search_volume_result)}, 값: {search_volume_result}")
             search_volume = None
         
         # 블로그 발행량 처리
         print(f"[키워드 분석기] 블로그 발행량 결과 타입: {type(blog_count)}, 값: {blog_count}")
         if isinstance(blog_count, Exception):
-            print(f"[키워드 분석기] 블로그 발행량 조회 실패 ({request.keyword}): {type(blog_count).__name__}: {str(blog_count)}")
+            print(f"[키워드 분석기] [실패] 블로그 발행량 조회 실패 ({request.keyword}): {type(blog_count).__name__}: {str(blog_count)}")
             if isinstance(blog_count, asyncio.TimeoutError):
                 print(f"  -> 타임아웃 에러")
             elif isinstance(blog_count, httpx.TimeoutException):
                 print(f"  -> HTTP 타임아웃 에러")
             elif isinstance(blog_count, httpx.HTTPStatusError):
-                print(f"  -> HTTP 상태 에러: {blog_count.response.status_code}")
+                status_code = blog_count.response.status_code if hasattr(blog_count, 'response') else 'N/A'
+                print(f"  -> HTTP 상태 에러: {status_code}")
+                try:
+                    error_text = blog_count.response.text[:500] if hasattr(blog_count, 'response') else 'N/A'
+                    print(f"  -> 에러 메시지: {error_text}")
+                except:
+                    pass
+            print(f"[키워드 분석기] 블로그 발행량 예외 상세:")
             print(traceback.format_exc())
             blog_count = None
         elif blog_count is None:
             print(f"[키워드 분석기] 블로그 발행량 조회 결과 없음 (None 반환) ({request.keyword})")
         else:
-            print(f"[키워드 분석기] 블로그 발행량 조회 성공: {blog_count} ({request.keyword})")
+            print(f"[키워드 분석기] [성공] 블로그 발행량 조회 성공: {blog_count} ({request.keyword})")
         
         # 경쟁 강도 계산 (검색량 기준)
         # 검색량이 None이면 경쟁 강도를 "unknown"으로 설정

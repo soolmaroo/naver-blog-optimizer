@@ -10,8 +10,13 @@ env_path = BASE_DIR / ".env"
 print(f"[Config] .env 파일 경로: {env_path}")
 print(f"[Config] .env 파일 존재 여부: {env_path.exists()}")
 
-# .env 파일 로드
-load_dotenv(dotenv_path=env_path, override=True)
+# .env 파일 로드 (에러 처리 강화)
+try:
+    load_dotenv(dotenv_path=env_path, override=True, encoding='utf-8')
+except Exception as e:
+    print(f"[Config] .env 파일 로드 중 오류 발생: {str(e)}")
+    print(f"[Config] .env 파일을 확인하고 수정하세요.")
+    # 계속 진행 (환경 변수는 이미 설정되어 있을 수 있음)
 
 # 환경 변수 확인 (디버깅용)
 google_key = os.getenv("GOOGLE_API_KEY", "")

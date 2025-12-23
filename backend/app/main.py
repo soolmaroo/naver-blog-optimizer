@@ -135,7 +135,11 @@ async def log_requests(request: Request, call_next):
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
+    allow_origins=[
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+        "http://localhost:5174",  # 추가 포트 지원
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -149,6 +153,17 @@ app.include_router(ai.router, prefix="/api", tags=["ai"])
 app.include_router(auth.router, prefix="/api/auth", tags=["auth"])
 
 
+@app.get("/", tags=["system"])
+async def root():
+    """루트 경로 - API 정보 반환"""
+    return {
+        "message": "Naver Blog Optimizer API",
+        "app": app.title,
+        "version": app.version,
+        "docs": "/docs",
+        "health": "/health"
+    }
+
 @app.get("/health", tags=["system"])
 async def health():
     log_to_file("[시스템] Health check 요청 수신")
@@ -156,6 +171,22 @@ async def health():
         "status": "ok",
         "app": app.title,
         "version": app.version
+    }
+
+@app.get("/api/routes", tags=["system"])
+async def get_routes():
+    """등록된 모든 라우트 목록 반환"""
+    routes = []
+    for route in app.routes:
+        if hasattr(route, "path") and hasattr(route, "methods"):
+            routes.append({
+                "path": route.path,
+                "methods": list(route.methods) if route.methods else [],
+                "name": getattr(route, "name", "unknown")
+            })
+    return {
+        "routes": routes,
+        "total": len(routes)
     }
 
 # 앱 시작 시 로그 기록
